@@ -1,0 +1,14 @@
+# Build outputs — regenerable, ~1GB, never tracked.
+build/
+build-*/
+cmake-build-*/
+
+# Model weights and downloaded artefacts.
+*.gguf
+*.bin
+*.safetensors
+
+# Python/venv noise.
+__pycache__/
+*.pyc
+.venv/
