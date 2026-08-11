@@ -1013,6 +1013,22 @@ static void test_tagged_peg_parser(testing & t) {
         }
     });
 
+    // The leniency above is JSON-ONLY. common_peg_string_parser also backs
+    // Python-style args, where a string closes on ')' — a legal follower
+    // that the JSON rule does not accept. Scanning past it broke valid
+    // calls (codex review, 2026-08-11). The suites had ZERO Python-style
+    // string-arg cases, so 952 green assertions did not cover this.
+    t.test("python-style string args still close on )", [&](testing & t) {
+        auto parser = build_tagged_peg_parser([](common_peg_parser_builder & p) {
+            return p.literal("[") + p.until("(") + p.literal("(") +
+                   p.until("=") + p.literal("=") +
+                   p.literal("\"") + p.string_content('"') + p.literal("\"") +
+                   p.literal(")") + p.literal("]");
+        });
+        auto result = parser.parse_anywhere_and_extract("[fn(text=\"hello\")]");
+        t.assert_true("python-style call still parses", result.result.success());
+    });
+
 }
 
 static void test_permute(testing & t) {

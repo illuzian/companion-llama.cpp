@@ -111,12 +111,10 @@ static std::string repair_unescaped_quotes(const std::string & input) {
                 continue;
             }
             size_t look = i + 1;
-            while (look < input.size() &&
-                   std::isspace(static_cast<unsigned char>(input[look]))) {
+            while (look < input.size() && std::isspace(static_cast<unsigned char>(input[look]))) {
                 look++;
             }
-            const bool closes = look >= input.size() ||
-                                input[look] == ',' || input[look] == ':' ||
+            const bool closes = look >= input.size() || input[look] == ',' || input[look] == ':' ||
                                 input[look] == '}' || input[look] == ']';
             if (closes) {
                 in_string = false;

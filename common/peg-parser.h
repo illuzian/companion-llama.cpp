@@ -236,6 +236,11 @@ struct common_peg_chars_parser {
 
 struct common_peg_string_parser {
     char delimiter;
+    // JSON ONLY. Opt-in leniency: treat a quote that cannot be a JSON
+    // closer as interior content (see the parser). Off for every other
+    // quoted string — Python-style args close on ')', which is a perfectly
+    // legal follower there and must not be scanned past.
+    bool json_lenient = false;
 };
 
 struct common_peg_until_parser {
@@ -458,7 +463,7 @@ class common_peg_parser_builder {
     common_peg_parser quoted_string();
 
     // Matches string content without the surrounding delimiter.
-    common_peg_parser string_content(char delimiter);
+    common_peg_parser string_content(char delimiter, bool json_lenient = false);
 
     // Creates a complete JSON parser supporting objects, arrays, strings, numbers, booleans, and null.
     //   value -> object | array | string | number | true | false | null
