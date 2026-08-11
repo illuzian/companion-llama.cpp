@@ -626,14 +626,15 @@ struct parser_executor {
                 // the call on invalid input. The captured span is repaired
                 // back into strict JSON by repair_unescaped_quotes() before
                 // it reaches any consumer.
-                size_t look = pos + 1;
-                while (look < ctx.input.size() &&
-                       std::isspace(static_cast<unsigned char>(ctx.input[look]))) {
-                    look++;
+                bool closes = true;
+                if (p.json_lenient) {
+                    size_t look = pos + 1;
+                    while (look < ctx.input.size() && std::isspace(static_cast<unsigned char>(ctx.input[look]))) {
+                        look++;
+                    }
+                    closes = look >= ctx.input.size() || ctx.input[look] == ',' || ctx.input[look] == ':' ||
+                             ctx.input[look] == '}' || ctx.input[look] == ']';
                 }
-                const bool closes = look >= ctx.input.size() ||
-                                    ctx.input[look] == ',' || ctx.input[look] == ':' ||
-                                    ctx.input[look] == '}' || ctx.input[look] == ']';
                 if (closes) {
                     // Found closing delimiter - success (don't consume it)
                     return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, pos);
@@ -1176,8 +1177,8 @@ common_peg_arena common_peg_parser_builder::build() {
 
 // String primitives
 
-common_peg_parser common_peg_parser_builder::string_content(char delimiter) {
-    return wrap(arena_.add_parser(common_peg_string_parser{delimiter}));
+common_peg_parser common_peg_parser_builder::string_content(char delimiter, bool json_lenient) {
+    return wrap(arena_.add_parser(common_peg_string_parser{delimiter, json_lenient}));
 }
 
 common_peg_parser common_peg_parser_builder::double_quoted_string() {
@@ -1217,7 +1218,7 @@ common_peg_parser common_peg_parser_builder::json_number() {
 
 common_peg_parser common_peg_parser_builder::json_string() {
     return rule("json-string", [this]() {
-        return sequence({literal("\""), string_content('"'), literal("\"")});
+        return sequence({literal("\""), string_content('"', /* json_lenient = */ true), literal("\"")});
     });
 }
 
@@ -1865,7 +1866,8 @@ static nlohmann::json serialize_parser_variant(const common_peg_parser_variant &
                 {"max_count", p.max_count}
             };
         } else if constexpr (std::is_same_v<T, common_peg_string_parser>) {
-            return json{{"type", "string"}, {"delimiter", std::string(1, p.delimiter)}};
+            return json{{"type", "string"}, {"delimiter", std::string(1, p.delimiter)},
+                        {"json_lenient", p.json_lenient}};
         } else if constexpr (std::is_same_v<T, common_peg_until_parser>) {
             return json{{"type", "until"}, {"delimiters", p.delimiters}};
         } else if constexpr (std::is_same_v<T, common_peg_schema_parser>) {
@@ -2004,7 +2006,8 @@ static common_peg_parser_variant deserialize_parser_variant(const nlohmann::json
         if (delimiter.empty()) {
             throw std::runtime_error("string parser delimiter is empty.");
         }
-        return common_peg_string_parser{delimiter[0]};
+        return common_peg_string_parser{delimiter[0],
+                                       j.value("json_lenient", false)};
     }
     if (type == "until") {
         if (!j.contains("delimiters") || !j["delimiters"].is_array()) {
