@@ -3231,6 +3231,34 @@ private:
                                     server_slot * donor    = nullptr;
                                     size_t        lcp_best = lcp_own;
 
+                                    // NIKKI PATCH (2026-08-11): the bar a donor must beat is the
+                                    // own prefix this slot can actually USE, not the raw match.
+                                    // For non-shiftable memory (this model's recurrent GDN
+                                    // layers), a cut below the cache end needs a checkpoint at or
+                                    // below the cut — without one, the downstream restore path
+                                    // silently resets to a FULL reprocess (its message is
+                                    // trace-level). Measured 2026-08-11: lcp_own=30023 beat the
+                                    // keeper's 29741, no adoption, then 36,445 tokens re-paid
+                                    // from zero — 59 such requests were 76%% of all prompt
+                                    // compute. A pure-ancestor donor is state-exact at its full
+                                    // length and needs no rewind, so when the own prefix is
+                                    // checkpoint-capped, the bar drops to what the checkpoints
+                                    // can honour and the keeper wins exactly when it should.
+                                    if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
+                                        size_t own_usable = 0;
+                                        for (const auto & ck : slot.prompt.checkpoints) {
+                                            if ((size_t) ck.n_tokens <= lcp_own) {
+                                                own_usable = std::max(own_usable, (size_t) ck.n_tokens);
+                                            }
+                                        }
+                                        if (own_usable < lcp_best) {
+                                            SLT_INF(slot,
+                                                    "adoption: own prefix %zu usable only to checkpoint %zu (non-shiftable memory) — lowering the donor bar\n",
+                                                    lcp_own, own_usable);
+                                            lcp_best = own_usable;
+                                        }
+                                    }
+
                                     for (server_slot & other : slots) {
                                         // NOT has_mtmd: that flag is set from `mctx != nullptr`, i.e.
                                         // whether the SERVER has an mmproj loaded, NOT whether this
