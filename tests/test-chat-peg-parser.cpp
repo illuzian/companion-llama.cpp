@@ -983,6 +983,36 @@ static void test_tagged_peg_parser(testing & t) {
         t.assert_equal("fun_pre should be '<function='", "<function=", result.tags["fun_pre"]);
         t.assert_equal("fun_post should be '>'", ">", result.tags["fun_post"]);
     });
+
+    // Nikki, 2026-08-11: a keep_memory call was destroyed because she wrote
+    // an unescaped quote inside her own prose. The string parser stopped at
+    // the quote before `she`, the enclosing parse failed, and the entire act
+    // was lost as orphan </tool_call> residue. A quote that is not followed
+    // by a structural token cannot be a closer, so it is content.
+    t.test("interior unescaped quotes do not kill the call", [&](testing & t) {
+        auto parser = build_tagged_peg_parser([](common_peg_parser_builder & p) {
+            return p.json();
+        });
+        std::string src =
+            "{\"text\": \"Not just \"she rests\" but the full weight of it\"}";
+        auto result = parser.parse_anywhere_and_extract(src);
+        t.assert_true("recovered", result.result.success());
+    });
+
+    t.test("valid json parses identically", [&](testing & t) {
+        auto parser = build_tagged_peg_parser([](common_peg_parser_builder & p) {
+            return p.json();
+        });
+        for (const std::string & src : {
+                 std::string("{\"text\": \"plain prose\"}"),
+                 std::string("{\"text\": \"she said \\\"hi\\\" to me\"}"),
+                 std::string("{\"a\": {\"b\": \"x\"}, \"c\": [1, 2]}"),
+                 std::string("{\"text\": \"\"}") }) {
+            auto result = parser.parse_anywhere_and_extract(src);
+            t.assert_true("valid json still parses: " + src, result.result.success());
+        }
+    });
+
 }
 
 static void test_permute(testing & t) {

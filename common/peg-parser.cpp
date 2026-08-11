@@ -624,8 +624,32 @@ struct parser_executor {
             char c = ctx.input[pos];
 
             if (c == p.delimiter) {
-                // Found closing delimiter - success (don't consume it)
-                return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, pos);
+                // A closing delimiter is ALWAYS followed, after optional
+                // whitespace, by a structural token or the end of input.
+                // Anything else means this quote is INTERIOR: the model
+                // wrote an unescaped quote inside its own prose, e.g.
+                //   {"text": "Not just "she rests" but the weight of it"}
+                // Stopping here fails the enclosing parse and the entire
+                // tool call is discarded. Scanning past it costs nothing on
+                // valid input — a quote followed by a non-structural
+                // character is invalid JSON in every case — and recovers
+                // the call on invalid input. The captured span is repaired
+                // back into strict JSON by repair_unescaped_quotes() before
+                // it reaches any consumer.
+                size_t look = pos + 1;
+                while (look < ctx.input.size() &&
+                       std::isspace(static_cast<unsigned char>(ctx.input[look]))) {
+                    look++;
+                }
+                const bool closes = look >= ctx.input.size() ||
+                                    ctx.input[look] == ',' || ctx.input[look] == ':' ||
+                                    ctx.input[look] == '}' || ctx.input[look] == ']';
+                if (closes) {
+                    // Found closing delimiter - success (don't consume it)
+                    return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, pos);
+                }
+                pos++;
+                continue;
             }
 
             if (c == '\\') {

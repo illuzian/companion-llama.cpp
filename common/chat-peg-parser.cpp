@@ -76,6 +76,62 @@ static std::string escape_json_string_inner(const std::string & s) {
     return escaped;
 }
 
+// Escape quotes the model left bare inside its own string values.
+//
+// The exact inverse of the closing-delimiter rule in common_peg_string_parser
+// (common/peg-parser.cpp): a quote that is NOT followed, after optional
+// whitespace, by a structural token or end of input cannot be a closer, so it
+// is content and must be escaped. Measured case that motivated this: a
+// keep_memory call destroyed because she wrote
+//   {"text": "Not just "she rests" but the full weight of it"}
+// The parser stopped at the quote before `she`, the call failed to parse, and
+// the whole act was lost as orphan </tool_call> residue.
+//
+// Returns the input unchanged when it is already valid JSON, so this is a
+// no-op on every well-formed call.
+static std::string repair_unescaped_quotes(const std::string & input) {
+    std::string out;
+    out.reserve(input.size() + 16);
+
+    bool in_string = false;
+    for (size_t i = 0; i < input.size(); ++i) {
+        const char c = input[i];
+
+        if (in_string && c == '\\' && i + 1 < input.size()) {
+            out += c;
+            out += input[i + 1];
+            ++i;
+            continue;
+        }
+
+        if (c == '"') {
+            if (!in_string) {
+                in_string = true;
+                out += c;
+                continue;
+            }
+            size_t look = i + 1;
+            while (look < input.size() &&
+                   std::isspace(static_cast<unsigned char>(input[look]))) {
+                look++;
+            }
+            const bool closes = look >= input.size() ||
+                                input[look] == ',' || input[look] == ':' ||
+                                input[look] == '}' || input[look] == ']';
+            if (closes) {
+                in_string = false;
+                out += c;
+            } else {
+                out += "\\\"";
+            }
+            continue;
+        }
+
+        out += c;
+    }
+    return out;
+}
+
 // Convert Python-style single-quoted strings to JSON double-quoted strings
 // Only converts outer string delimiters, properly handling escape sequences:
 // - {'key': 'value'} -> {"key": "value"}
@@ -377,7 +433,18 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
         // For tagged format: built up from individual arg_name/arg_value nodes
         auto text = trim_trailing_space(node.text);
         if (!text.empty() && text.front() == '{') {
-            args_target() = std::string(text);
+            // node.text is the RAW source span, so a call the lenient string
+            // parser recovered still carries the model's bare quotes. Repair
+            // it here, once, before any consumer sees it — but only when it
+            // does not already parse, so well-formed calls are untouched.
+            std::string args(text);
+            if (!ordered_json::accept(args)) {
+                std::string repaired = repair_unescaped_quotes(args);
+                if (ordered_json::accept(repaired)) {
+                    args = std::move(repaired);
+                }
+            }
+            args_target() = args;
         }
     }
 
