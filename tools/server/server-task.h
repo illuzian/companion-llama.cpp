@@ -10,6 +10,7 @@
 
 // TODO: prevent including the whole server-common.h as we only use server_tokens
 #include "server-common.h"
+#include "server-shared-kv.h"
 
 using json = nlohmann::ordered_json;
 
@@ -56,18 +57,22 @@ struct task_params {
 
     int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
 
-    int32_t n_keep    =  0; // number of tokens to keep from initial prompt
-    int32_t n_discard =  0; // number of tokens after n_keep that may be discarded when shifting context, 0 defaults to half
-    int32_t n_predict = -1; // new tokens to predict
-    int32_t n_indent  =  0; // minimum line indentation for the generated text in number of whitespace characters
-    int32_t n_cmpl    =  1; // number of completions to generate from this prompt
+    int32_t n_keep = 0;             // number of tokens to keep from initial prompt
+    int32_t n_discard =
+        0;  // number of tokens after n_keep that may be discarded when shifting context, 0 defaults to half
+    int32_t n_predict = -1;     // new tokens to predict
+    int32_t n_indent  = 0;      // minimum line indentation for the generated text in number of whitespace characters
+    int32_t n_cmpl    = 1;      // number of completions to generate from this prompt
 
-    int32_t n_cache_reuse = 0; // min chunk size to attempt reusing from the cache via KV shifting (0 = disabled)
+    int32_t n_cache_reuse = 0;  // min chunk size to attempt reusing from the cache via KV shifting (0 = disabled)
 
-    int64_t t_max_prompt_ms  = -1; // TODO: implement
-    int64_t t_max_predict_ms = -1; // if positive, limit the generation phase to this time limit
+    server_shared_kv_expectation               shared_kv_expectation;
+    std::optional<server_keeper_context_shift> keeper_context_shift;
 
-    std::map<int, float> lora; // mapping adapter ID -> scale
+    int64_t t_max_prompt_ms  = -1;  // TODO: implement
+    int64_t t_max_predict_ms = -1;  // if positive, limit the generation phase to this time limit
+
+    std::map<int, float> lora;      // mapping adapter ID -> scale
 
     std::vector<std::string> antiprompt;
     std::vector<std::string> response_fields;
@@ -342,34 +347,35 @@ struct server_task_result_cmpl_final : server_task_result {
     llama_tokens tokens;
 
     bool stream;
-    bool include_usage;
+    bool           include_usage;
     result_timings timings;
-    std::string prompt;
+    std::string    prompt;
 
-    bool truncated;
-    int32_t n_decoded;
-    int32_t n_prompt_tokens;
-    int32_t n_prompt_tokens_cache;
-    int32_t n_tokens_cached;
-    bool has_new_line;
+    bool        truncated;
+    int32_t     n_decoded;
+    int32_t     n_prompt_tokens;
+    int32_t     n_prompt_tokens_cache;
+    int32_t     n_tokens_cached;
+    bool        has_new_line;
     std::string stopping_word;
-    stop_type stop = STOP_TYPE_NONE;
+    stop_type   stop = STOP_TYPE_NONE;
 
-    bool post_sampling_probs;
+    bool                                 post_sampling_probs;
     std::vector<completion_token_output> probs_output;
-    std::vector<std::string>  response_fields;
+    std::vector<std::string>             response_fields;
 
-    task_params generation_params;
+    task_params                                            generation_params;
+    std::optional<server_keeper_context_shift_observation> keeper_context_shift;
 
     // response formatting
     bool               verbose  = false;
     task_response_type res_type = TASK_RESPONSE_TYPE_NONE;
     std::string        oaicompat_model;
     std::string        oaicompat_cmpl_id;
-    common_chat_msg    oaicompat_msg; // to be populated by update()
+    common_chat_msg    oaicompat_msg;                       // to be populated by update()
 
-    std::vector<common_chat_msg_diff> oaicompat_msg_diffs; // to be populated by update()
-    bool is_updated = false;
+    std::vector<common_chat_msg_diff> oaicompat_msg_diffs;  // to be populated by update()
+    bool                              is_updated = false;
 
     // for OpenAI Responses API
     std::string oai_resp_id;

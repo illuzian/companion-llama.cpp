@@ -69,6 +69,32 @@ extern "C" {
     typedef int32_t llama_token;
     typedef int32_t llama_seq_id;
 
+    // Physical cell accounting for one independently allocated leaf memory
+    // component. Composite memory implementations are reported depth-first in
+    // a stable order and component_index identifies an entry in that order.
+    enum llama_memory_cell_type {
+        LLAMA_MEMORY_CELL_TYPE_UNKNOWN   = 0,
+        LLAMA_MEMORY_CELL_TYPE_ATTENTION = 1,
+        LLAMA_MEMORY_CELL_TYPE_RECURRENT = 2,
+    };
+
+    struct llama_memory_cell_usage {
+        uint32_t component_index;
+        enum llama_memory_cell_type type;
+
+        uint64_t capacity_cells;
+        uint64_t occupied_cells;
+        uint64_t sequence_references;
+        uint64_t duplicate_sequence_references;
+        uint64_t shared_cells;
+
+        // Counts for the sequence requested from llama_memory_get_cell_usage().
+        // These fields are zero when the requested sequence is absent or negative.
+        uint64_t sequence_cells;
+        uint64_t sequence_shared_cells;
+        uint64_t sequence_exclusive_cells;
+    };
+
     enum llama_vocab_type {
         LLAMA_VOCAB_TYPE_NONE   = 0, // For models without vocab
         LLAMA_VOCAB_TYPE_SPM    = 1, // LLaMA tokenizer based on byte-level BPE with byte fallback
@@ -838,6 +864,16 @@ extern "C" {
 
     // Check if the memory supports shifting
     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
+
+    // Return physical cell/reference accounting for every leaf memory component.
+    // The return value is the number of components available. At most n_usage
+    // entries are written to usage; pass NULL and zero to query the required size.
+    // sequence_id selects the per-sequence fields and may be negative to omit them.
+    LLAMA_API size_t llama_memory_get_cell_usage(
+            llama_memory_t mem,
+              llama_seq_id sequence_id,
+            struct llama_memory_cell_usage * usage,
+                     size_t n_usage);
 
     //
     // State / sessions

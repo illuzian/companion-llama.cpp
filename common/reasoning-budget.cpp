@@ -144,20 +144,18 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
             break;
         }
         case REASONING_BUDGET_DONE:
-            // Re-arm on a new start tag: some models emit multiple <think> blocks
-            // per response, and each should get a fresh budget window.
+            // FIX(2026-08-20): a response gets exactly ONE reasoning window.
+            // Re-arming used to grant further windows (originally a full
+            // fresh budget each), letting a degenerate loop re-open its
+            // reasoning and consume reply tokens. She never gets the
+            // opportunity to re-reason: any later start tag is force-closed
+            // immediately, and the event logs at WRN so it is visible.
             if (ctx->start_matcher.advance(token) >= 0) {
-                ctx->state = REASONING_BUDGET_COUNTING;
-                ctx->remaining = ctx->budget;
+                ctx->state = REASONING_BUDGET_FORCING;
+                ctx->force_pos = 0;
                 ctx->end_matcher.reset();
                 ctx->end_match = -1;
-                COM_TRC("re-activated on new start tag, budget=%d tokens\n", ctx->budget);
-
-                if (ctx->remaining <= 0) {
-                    ctx->state = REASONING_BUDGET_FORCING;
-                    ctx->force_pos = 0;
-                    COM_TRC("%s", "budget=0, forcing immediately\n");
-                }
+                COM_WRN("%s", "reasoning re-opened after its window ended; forcing immediate close\n");
             }
             break;
     }
@@ -271,6 +269,33 @@ common_reasoning_budget_state common_reasoning_budget_get_state(const struct lla
         return REASONING_BUDGET_IDLE;
     }
     return ((const common_reasoning_budget_ctx *)smpl->ctx)->state;
+}
+
+void common_reasoning_budget_begin_generation(
+        struct llama_sampler * smpl,
+        int32_t                  generated_budget) {
+    if (!smpl) {
+        return;
+    }
+
+    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
+
+    // The request budget governs this generation and every later re-arm, so it
+    // must be installed even when the prefill left no block open. A prefill
+    // that already closed its reasoning (or never opened one) leaves the
+    // sampler DONE or IDLE; returning early without this would keep the
+    // unlimited seed used while accepting the prefill, and any block the model
+    // opens afterwards would generate uncapped.
+    ctx->budget = generated_budget;
+    if (ctx->state == REASONING_BUDGET_IDLE || ctx->state == REASONING_BUDGET_DONE) {
+        return;
+    }
+
+    ctx->remaining = generated_budget;
+    ctx->state = generated_budget <= 0 ? REASONING_BUDGET_FORCING : REASONING_BUDGET_COUNTING;
+    ctx->force_pos = 0;
+    ctx->end_matcher.reset();
+    ctx->end_match = -1;
 }
 
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl) {

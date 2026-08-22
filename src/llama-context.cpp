@@ -12,6 +12,7 @@
 #include "llama-ext.h"
 #include "llama.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -3971,6 +3972,28 @@ bool llama_memory_can_shift(llama_memory_t mem) {
     }
 
     return mem->get_can_shift();
+}
+
+size_t llama_memory_get_cell_usage(
+        llama_memory_t mem,
+          llama_seq_id sequence_id,
+        struct llama_memory_cell_usage * usage,
+                 size_t n_usage) {
+    if (!mem) {
+        return 0;
+    }
+
+    std::vector<llama_memory_cell_usage> values = mem->get_cell_usage(sequence_id);
+    for (size_t index = 0; index < values.size(); ++index) {
+        values[index].component_index = index;
+    }
+
+    if (usage) {
+        const size_t copy_count = std::min(n_usage, values.size());
+        std::copy_n(values.begin(), copy_count, usage);
+    }
+
+    return values.size();
 }
 
 // llama state API

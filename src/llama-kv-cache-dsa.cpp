@@ -94,6 +94,13 @@ llama_pos llama_kv_cache_dsa::seq_pos_max(llama_seq_id seq_id) const {
     return kv_mla->seq_pos_max(seq_id);
 }
 
+std::vector<llama_memory_cell_usage> llama_kv_cache_dsa::get_cell_usage(llama_seq_id seq_id) const {
+    std::vector<llama_memory_cell_usage> result = kv_mla->get_cell_usage(seq_id);
+    const std::vector<llama_memory_cell_usage> lid = kv_lid->get_cell_usage(seq_id);
+    result.insert(result.end(), lid.begin(), lid.end());
+    return result;
+}
+
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsa::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = kv_mla->memory_breakdown();
     for (const auto & buft_size : kv_lid->memory_breakdown()) {

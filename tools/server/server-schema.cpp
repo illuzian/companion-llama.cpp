@@ -384,6 +384,9 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_hard_limits(-1, INT32_MAX)
         ->set_desc("Number of tokens in the reasoning budget (-1 = disabled)"));
 
+    add((new field_bool("reasoning_budget_excludes_prefill", params.sampling.reasoning_budget_excludes_prefill))
+        ->set_desc("Apply the reasoning budget only to tokens generated after the rendered prefill"));
+
     add((new field_str("reasoning_budget_start_tag"))
         ->set_desc("Token string marking the start of the reasoning budget section")
         ->set_handler([&](field_eval_context & ctx, const json & data) {

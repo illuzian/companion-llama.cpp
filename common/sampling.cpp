@@ -297,16 +297,22 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
 
     // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
     if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+        const int32_t initial_reasoning_budget = params.reasoning_budget_excludes_prefill
+            ? INT_MAX
+            : params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens;
         rbudget = common_reasoning_budget_init(
             vocab,
             {params.reasoning_budget_start},
             params.reasoning_budget_end,
             params.reasoning_budget_forced,
-            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+            initial_reasoning_budget);
 
         for (const auto & token : prefill_tokens) {
             llama_sampler_accept(rbudget, token);
             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+        }
+        if (params.reasoning_budget_excludes_prefill) {
+            common_reasoning_budget_begin_generation(rbudget, params.reasoning_budget_tokens);
         }
     }
 

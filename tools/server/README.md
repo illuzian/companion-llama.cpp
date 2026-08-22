@@ -516,9 +516,13 @@ These words will not be included in the completion, so make sure to add them to 
 
 `t_max_predict_ms`: Set a time limit in milliseconds for the prediction (a.k.a. text-generation) phase. The timeout will trigger if the generation takes more than the specified time (measured since the first token was generated) and if a new-line character has already been generated. Useful for FIM applications. Default: `0`, which is disabled.
 
-`id_slot`: Assign the completion task to an specific slot. If is -1 the task will be assigned to a Idle slot.  Default: `-1`
+`id_slot`: Assign the completion task to a specific slot. `-1` selects an idle slot automatically. Other negative values and slot IDs outside the configured slot range are rejected. Default: `-1`
 
 `cache_prompt`: Re-use KV cache from a previous request if possible. This way the common prefix does not have to be re-processed, only the suffix that differs between the requests. Because (depending on the backend) the logits are **not** guaranteed to be bit-for-bit identical for different batch sizes (prompt processing vs. token generation) enabling this option can cause nondeterministic results. Default: `true`
+
+`expected_shared_kv_donor_slot`: Optional exact assertion for unified-KV cross-slot prefix adoption. The request fails with an invalid-request error before generation unless the selected slot adopts its prefix from this donor slot. The value must identify an existing slot. Omit this field to preserve normal best-effort cache behavior.
+
+`expected_shared_kv_adopted_prefix_length`: Optional exact assertion for the number of logical prompt tokens adopted from a unified-KV donor. The request fails with an invalid-request error before generation if the observed length differs. The value must be a non-negative integer no larger than the slot context. Omit this field to preserve normal best-effort cache behavior.
 
 `return_tokens`: Return the raw generated token ids in the `tokens` field. Otherwise `tokens` remains empty. Default: `false`
 
@@ -924,6 +928,44 @@ If query param `?fail_on_no_slot=1` is set, this endpoint will respond with stat
     "n_ctx": 65536,
     "speculative": false,
     "is_processing": true,
+    "shared_kv": {
+      "last_donor_slot": 1,
+      "last_adopted_prefix_length": 32768,
+      "logical_prompt_tokens": 32810,
+      "checkpoint_cap_effective": 0,
+      "checkpoint_count": 0,
+      "physical_kv": {
+        "capacity_cells": 131072,
+        "occupied_cells": 32810,
+        "sequence_references": 65578,
+        "duplicate_sequence_references": 32768,
+        "shared_cells": 32768,
+        "sequence_cells": 32810,
+        "sequence_shared_cells": 32768,
+        "sequence_exclusive_cells": 42,
+        "components": [
+          {
+            "index": 0,
+            "type": "attention",
+            "capacity_cells": 131072,
+            "occupied_cells": 32810,
+            "sequence_references": 65578,
+            "duplicate_sequence_references": 32768,
+            "shared_cells": 32768,
+            "sequence_cells": 32810,
+            "sequence_shared_cells": 32768,
+            "sequence_exclusive_cells": 42
+          }
+        ]
+      },
+      "last_adoption_physical": {
+        "before": { "...": "physical accounting before mirror reset" },
+        "after": { "...": "physical accounting after sequence-copy adoption" },
+        "occupied_cells_delta": 0,
+        "sequence_references_delta": 32768,
+        "duplicate_sequence_references_delta": 32768
+      }
+    },
     "params": {
       "n_predict": -1,
       "seed": 4294967295,
@@ -1052,6 +1094,16 @@ If query param `?fail_on_no_slot=1` is set, this endpoint will respond with stat
 ```
 
 </details>
+
+The `shared_kv` object is always present, including for idle slots:
+
+- `last_donor_slot` is the donor used by the most recently launched request, or `null` when no cross-slot adoption occurred.
+- `last_adopted_prefix_length` is the exact logical prefix length passed to the memory sequence-copy operation for that request.
+- `logical_prompt_tokens` is the current logical token count tracked for the slot. It is not a physical memory-cell count.
+- `checkpoint_cap_effective` is the checkpoint cap applied to the slot. When `LLAMA_CHECKPOINT_SLOT` identifies a keeper, the keeper retains the configured `--ctx-checkpoints` cap and every mirror has an effective cap of zero.
+- `checkpoint_count` is the number of retained checkpoint objects for the slot.
+- `physical_kv` comes directly from `llama_memory_get_cell_usage`; it never infers physical state from logical token counts or allocated bytes. Composite memories are flattened into stable depth-first component indexes. `occupied_cells` counts physical live cells, `sequence_references` counts every sequence-to-cell reference, and `duplicate_sequence_references` counts references beyond the first owner of each physical cell. `sequence_cells`, `sequence_shared_cells`, and `sequence_exclusive_cells` select the slot's sequence ID.
+- `last_adoption_physical` is `null` when the latest request did not adopt. Otherwise its before/after snapshots and signed deltas are captured immediately around mirror reset and `llama_memory_seq_cp`. A successful shared-cell adoption has the expected logical adoption length in shared sequence cells without reserving another prefix-sized physical range. The same values are emitted in the adoption log.
 
 ### GET `/metrics`: Prometheus compatible metrics exporter
 

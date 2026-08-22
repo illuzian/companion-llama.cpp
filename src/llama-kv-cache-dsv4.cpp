@@ -1334,6 +1334,17 @@ llama_pos llama_kv_cache_dsv4::seq_pos_max(llama_seq_id seq_id) const {
     return kv_raw->seq_pos_max(seq_id);
 }
 
+std::vector<llama_memory_cell_usage> llama_kv_cache_dsv4::get_cell_usage(llama_seq_id seq_id) const {
+    std::vector<llama_memory_cell_usage> result = kv_raw->get_cell_usage(seq_id);
+
+    for (const llama_kv_cache * component : { kv_csa.get(), kv_hca.get(), kv_lid.get() }) {
+        const std::vector<llama_memory_cell_usage> usage = component->get_cell_usage(seq_id);
+        result.insert(result.end(), usage.begin(), usage.end());
+    }
+
+    return result;
+}
+
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsv4::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = kv_raw->memory_breakdown();
     for (const auto & buft_size : kv_csa->memory_breakdown()) {

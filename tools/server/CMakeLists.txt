@@ -23,6 +23,7 @@ add_library(${TARGET} STATIC
     server-mcp.h
     server-schema.cpp
     server-schema.h
+    server-shared-kv.h
 )
 
 if (BUILD_SHARED_LIBS)
@@ -63,3 +64,10 @@ install(TARGETS ${TARGET} RUNTIME)
 
 target_link_libraries(${TARGET} PRIVATE llama-server-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+if (LLAMA_BUILD_TESTS)
+    add_executable(test-server-shared-kv tests/test-shared-kv.cpp)
+    target_compile_features(test-server-shared-kv PRIVATE cxx_std_17)
+    target_include_directories(test-server-shared-kv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test-server-shared-kv COMMAND test-server-shared-kv)
+endif()

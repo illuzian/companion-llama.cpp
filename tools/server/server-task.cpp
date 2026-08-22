@@ -366,36 +366,47 @@ json server_task_result_cmpl_final::to_json() {
 }
 
 json server_task_result_cmpl_final::to_json_non_oaicompat() {
-    json res = json {
-        {"index",               index},
-        {"content",             content},
-        {"tokens",              tokens},
-        {"id_slot",             id_slot},
-        {"stop",                true},
-        {"model",               oaicompat_model},
-        {"tokens_predicted",    n_decoded},
-        {"tokens_evaluated",    n_prompt_tokens},
-        {"generation_settings", generation_params.to_json()},
-        {"prompt",              prompt},
-        {"has_new_line",        has_new_line},
-        {"truncated",           truncated},
-        {"stop_type",           stop_type_to_str(stop)},
-        {"stopping_word",       stopping_word},
-        {"tokens_cached",       n_tokens_cached},
-        {"timings",             timings.to_json()},
+    json res = json{
+        { "index",               index                       },
+        { "content",             content                     },
+        { "tokens",              tokens                      },
+        { "id_slot",             id_slot                     },
+        { "stop",                true                        },
+        { "model",               oaicompat_model             },
+        { "tokens_predicted",    n_decoded                   },
+        { "tokens_evaluated",    n_prompt_tokens             },
+        { "generation_settings", generation_params.to_json() },
+        { "prompt",              prompt                      },
+        { "has_new_line",        has_new_line                },
+        { "truncated",           truncated                   },
+        { "stop_type",           stop_type_to_str(stop)      },
+        { "stopping_word",       stopping_word               },
+        { "tokens_cached",       n_tokens_cached             },
+        { "timings",             timings.to_json()           },
     };
     if (!stream && !probs_output.empty()) {
-        res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
+        res["completion_probabilities"] =
+            completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
     }
-    return response_fields.empty() ? res : json_get_nested_values(response_fields, res);
+    json response = response_fields.empty() ? std::move(res) : json_get_nested_values(response_fields, res);
+    if (keeper_context_shift) {
+        response["keeper_context_shift"] = {
+            { "applied",               keeper_context_shift->applied               },
+            { "removal_start",         keeper_context_shift->removal_start         },
+            { "discarded_tokens",      keeper_context_shift->discarded_tokens      },
+            { "logical_tokens_before", keeper_context_shift->logical_tokens_before },
+            { "logical_tokens_after",  keeper_context_shift->logical_tokens_after  },
+        };
+    }
+    return response;
 }
 
 json server_task_result_cmpl_final::usage_json_oaicompat() {
-    return json {
-        {"completion_tokens", n_decoded},
-        {"prompt_tokens",     n_prompt_tokens},
-        {"total_tokens",      n_decoded + n_prompt_tokens},
-        {"prompt_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
+    return json{
+        { "completion_tokens",     n_decoded                                          },
+        { "prompt_tokens",         n_prompt_tokens                                    },
+        { "total_tokens",          n_decoded + n_prompt_tokens                        },
+        { "prompt_tokens_details", json{ { "cached_tokens", n_prompt_tokens_cache } } },
     };
 }
 
