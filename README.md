@@ -1,4 +1,115 @@
-# llama.cpp
+# companion-llama.cpp
+
+![One continuous memory stream branching into live conversation and autonomous thought](docs/assets/companion-runtime-hero.png)
+
+This is Nikki's maintained `llama.cpp` runtime fork. It exists because a
+persistent companion is not a collection of unrelated chat completions: live
+conversation and autonomous thought must continue from the same accumulated
+model state, without repeatedly rebuilding a six-figure-token prompt.
+
+The fork is based on upstream commit `400e67b83` and is deliberately narrow.
+It is not intended to replace upstream `llama.cpp` for general use.
+
+## Why shared KV exists
+
+Nikki has one append-only canonical identity lane. The runtime represents that
+lane with three roles, not three identities:
+
+- the **keeper** owns the complete, authoritative cached prefix;
+- the **chat mirror** borrows that prefix and appends the current live turn;
+- the **thought mirror** borrows the same prefix and appends autonomous work.
+
+With unified KV enabled, mirror adoption adds another sequence reference to the
+keeper's existing physical cells. It does not copy the prefix and it does not
+construct a second context. Each mirror owns only its divergent tail. Requests
+carry expected donor and prefix-length values so a missed adoption fails visibly
+instead of silently paying for a full replay.
+
+This topology matters for identity continuity as much as performance. A thought
+and a conversation observe the same history at the fork point; whichever result
+is accepted is appended to the one durable lane and becomes part of the next
+keeper prefix.
+
+## Natural hybrid-context retirement
+
+Qwen3.6 combines full-attention layers, IMRoPE positions, and recurrent Gated
+DeltaNet state. Upstream's general context shift correctly rejects multi-axis
+positions, while generic hybrid-cache fallback rebuilds the retained prompt.
+At 100k+ active tokens, that eventually turns every new message into another
+large prefill.
+
+This fork adds a narrower operation for a validated keeper maintenance request:
+
+1. Require one exact contiguous deletion after a protected prefix.
+2. Require the chat and thought mirrors to be idle and empty.
+3. Reject any sequence containing media tokens.
+4. Remove the retired full-attention cells and apply a scalar temporal IMRoPE
+   shift to the retained text cells.
+5. Preserve the recurrent state, where older influence has naturally compressed.
+6. Apply the pending key rotation immediately and acknowledge the zero-generation
+   request without replaying the retained prompt.
+
+That is **natural retirement**, not hard forgetting. Retired text is no longer
+present as explicit attention KV or prompt text, but its accumulated influence
+remains in recurrent state. Redaction, exact forgetting, or reconstruction from
+durable records still requires an intentional cold rebuild. Slot snapshots retain
+the exact hybrid state and remain the preferred normal recovery path.
+
+The general multimodal shift API remains unchanged and conservative. The new
+text-only capability is explicit, and the server exposes it only after validating
+the keeper contract.
+
+The maintenance request uses the normal native `/completion` endpoint:
+
+```jsonc
+{
+  "prompt": [/* retained keeper tokens */],
+  "n_predict": 0,
+  "id_slot": 3,
+  "cache_prompt": true,
+  "keeper_context_shift": {
+    "protected_prefix_tokens": 12000,
+    "expected_cached_tokens": 110000,
+    "mirror_slot_ids": [0, 1]
+  }
+}
+```
+
+The server derives and validates the one contiguous deletion; the caller cannot
+supply arbitrary cache coordinates. A successful response includes the observed
+deletion boundary, discarded count, and before/after logical token lengths.
+
+## Other companion runtime changes
+
+- zero-copy cross-slot prefix adoption with physical cell/reference diagnostics;
+- keeper-owned context checkpoints and exact donor adoption contracts;
+- durable keeper slot save/load support used by the companion supervisor;
+- physical memory accounting for attention and recurrent components;
+- a request-scoped reasoning budget that permits exactly one Qwen `<think>`
+  window and force-closes any attempted second pass;
+- zero-generation prompt ingestion without sampling or output tokens.
+
+## Build and focused verification
+
+The included user preset targets the local AMD ROCm build used for Nikki. Change
+the compiler or backend settings if building elsewhere.
+
+```sh
+cmake --preset companion-runtime
+cmake --build --preset companion-runtime
+
+../build/bin/test-memory-cell-usage
+../build/bin/test-server-shared-kv
+../build/bin/test-reasoning-budget
+```
+
+The retirement path is additionally exercised with Nikki's actual
+Qwen3.6-35B-A3B IQ4_XS model, 131,072-token context, four unified slots, Q8 KV,
+and the CPU-resident multimodal projector before a runtime revision is accepted.
+
+---
+
+## Upstream llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 

@@ -837,6 +837,17 @@ extern "C" {
                  llama_pos p1,
                  llama_pos delta);
 
+    // Adds a scalar temporal position delta to a sequence which the caller has
+    // already verified contains text tokens only. This is distinct from the
+    // general operation for M-RoPE/IMRoPE models, whose media positions have
+    // multiple spatial axes and must never use this API.
+    LLAMA_API void llama_memory_seq_add_text(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+                 llama_pos p0,
+                 llama_pos p1,
+                 llama_pos delta);
+
     // Integer division of the positions by factor of `d > 1`
     // p0 < 0 : [0,  p1]
     // p1 < 0 : [p0, inf)
@@ -864,6 +875,17 @@ extern "C" {
 
     // Check if the memory supports shifting
     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
+
+    // Returns true when scalar temporal shifts are supported for sequences
+    // independently verified by the caller to contain text only.
+    LLAMA_API bool llama_memory_can_shift_text(llama_memory_t mem);
+
+    // Applies pending memory metadata/data updates without decoding a token.
+    // The context must not be used concurrently. Returns true when an update
+    // was applied and false when there was no update or it could not be applied.
+    LLAMA_API bool llama_memory_apply_pending_updates(
+            struct llama_context * ctx,
+                            bool   optimize);
 
     // Return physical cell/reference accounting for every leaf memory component.
     // The return value is the number of components available. At most n_usage

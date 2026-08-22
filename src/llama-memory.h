@@ -101,6 +101,14 @@ struct llama_memory_i {
     // getters
     virtual bool get_can_shift() const = 0;
 
+    // Some multi-axis RoPE models can safely apply a scalar temporal shift to
+    // text-only sequences even though their general (multimodal) memory is not
+    // shiftable. This remains false unless a memory implementation explicitly
+    // supports that narrower operation.
+    virtual bool get_can_shift_text() const {
+        return get_can_shift();
+    }
+
     //
     // ops
     //
@@ -112,6 +120,16 @@ struct llama_memory_i {
     virtual void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) = 0;
     virtual void seq_keep(llama_seq_id seq_id) = 0;
     virtual void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) = 0;
+
+    // Apply a scalar temporal shift to a sequence already validated as
+    // text-only by the caller.
+    virtual void seq_add_text(
+            llama_seq_id seq_id,
+               llama_pos p0,
+               llama_pos p1,
+               llama_pos shift) {
+        seq_add(seq_id, p0, p1, shift);
+    }
     virtual void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) = 0;
 
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;

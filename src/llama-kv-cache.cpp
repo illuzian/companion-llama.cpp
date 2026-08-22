@@ -395,6 +395,7 @@ void llama_kv_cache::clear(bool data) {
         v_cells[s].reset();
         v_heads[s] = 0;
     }
+    shift_text_only = false;
 
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
@@ -624,14 +625,29 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
 }
 
 void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
+    GGML_ASSERT(
+        hparams.n_pos_per_embd() == 1 &&
+        "seq_add() does not support multi-axis positions; use the text-only operation after validating the sequence");
+    seq_add_impl(seq_id, p0, p1, shift, false);
+}
+
+void llama_kv_cache::seq_add_text(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
+    GGML_ASSERT(get_can_shift_text() && "text-only position shifting is not supported by this cache");
+    seq_add_impl(seq_id, p0, p1, shift, true);
+}
+
+void llama_kv_cache::seq_add_impl(
+        llama_seq_id seq_id,
+           llama_pos p0,
+           llama_pos p1,
+           llama_pos shift,
+                bool text_only) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
     }
 
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
-    GGML_ASSERT(hparams.n_pos_per_embd() == 1 && "seq_add() is only supported for n_pos_per_embd() == 1");
-
     auto & cells = v_cells[seq_to_stream[seq_id]];
     auto & head  = v_heads[seq_to_stream[seq_id]];
 
@@ -654,18 +670,26 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, ll
         return;
     }
 
+    const bool had_pending_shift = get_has_shift();
+    bool       shifted           = false;
+
     for (uint32_t i = 0; i < cells.size(); ++i) {
         if (!cells.pos_in(i, p0, p1)) {
             continue;
         }
 
         if (cells.seq_has(i, seq_id)) {
+            shifted = true;
             if (cells.pos_add(i, shift)) {
                 if (new_head == cells.size()) {
                     new_head = i;
                 }
             }
         }
+    }
+
+    if (shifted) {
+        shift_text_only = had_pending_shift ? shift_text_only && text_only : text_only;
     }
 
     // If we freed up a slot, set head to it so searching can start there.
@@ -938,7 +962,8 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
     }
 
     if (do_shift) {
-        if (!get_can_shift()) {
+        const bool can_shift = shift_text_only ? get_can_shift_text() : get_can_shift();
+        if (!can_shift) {
             GGML_ABORT("The current KV cache / model configuration does not support K-shift");
         }
 
@@ -973,6 +998,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
 
             cells.reset_shift();
         }
+        shift_text_only = false;
     }
 
     return updated;
@@ -1307,6 +1333,27 @@ bool llama_kv_cache::get_can_shift() const {
         return false;
     }
     // shifting would leave k_idx stale
+    for (const auto & layer : layers) {
+        if (layer.k_idx) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool llama_kv_cache::get_can_shift_text() const {
+    // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
+    if (model.arch == LLM_ARCH_STEP35) {
+        return false;
+    }
+    if (hparams.n_pos_per_embd() > 1 &&
+        hparams.rope_type != LLAMA_ROPE_TYPE_MROPE &&
+        hparams.rope_type != LLAMA_ROPE_TYPE_IMROPE) {
+        return false;
+    }
+    // M-RoPE/IMRoPE text positions share one temporal coordinate. The shift
+    // graph normalizes their key rotation to NEOX ordering. Spatial media
+    // positions are deliberately excluded by the caller contract.
     for (const auto & layer : layers) {
         if (layer.k_idx) {
             return false;

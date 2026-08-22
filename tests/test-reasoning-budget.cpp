@@ -263,7 +263,9 @@ static void test_reasoning_budget_end_match() {
     const std::vector<llama_tokens> start = {{100}};
     const std::vector<llama_tokens> end   = {{101}, {103, 104}};
 
-    // natural end records the sequence that matched; re-arming clears it
+    // Natural end records the sequence that matched. A later start tag cannot
+    // open a second reasoning window; it clears the old match and is closed
+    // immediately.
     {
         auto * sampler = common_reasoning_budget_init(nullptr, start, end, {102, 101}, 5, REASONING_BUDGET_IDLE);
 
@@ -278,7 +280,8 @@ static void test_reasoning_budget_end_match() {
         GGML_ASSERT(matched != nullptr);
         GGML_ASSERT(*matched == llama_tokens({103, 104}));
 
-        llama_sampler_accept(sampler, 100); // re-arm, COUNTING
+        llama_sampler_accept(sampler, 100); // attempted re-open, FORCING
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
         GGML_ASSERT(common_reasoning_budget_get_end_match(sampler) == nullptr);
 
         llama_sampler_free(sampler);
@@ -461,27 +464,25 @@ int main(void) {
             3);     // forcing continues through i=3
     }
 
-    // Test 6: Multi-block thinking. First block ends naturally at i=2, second
-    // start tag at i=3 re-arms the budget, which then exhausts at i=5.
-    // Regression: before this fix, DONE absorbed all subsequent tokens and a
-    // second <think> block ran unbudgeted.
+    // Test 6: A response gets exactly one reasoning window. The first block
+    // ends naturally at i=2. A second start tag at i=3 is closed immediately,
+    // without granting another budget or another reasoning pass.
     // Flow: i=0 accept(100)->COUNTING rem=2; i=1 accept(50)->rem=1;
     //       i=2 accept(101)->end_matcher matches, DONE;
-    //       i=3 accept(100)->re-arm, COUNTING rem=2;
-    //       i=4 accept(60)->rem=1; i=5 accept(61)->rem=0->FORCING;
-    //       i=6 apply()->forces token[0]=102, accept(62)->force_pos=1, stay FORCING;
-    //       i=7 apply()->forces token[1]=101, accept(63)->force_pos=2->DONE.
+    //       i=3 accept(100)->FORCING;
+    //       i=4 apply()->forces token[0]=102, accept(60)->force_pos=1;
+    //       i=5 apply()->forces token[1]=101, accept(61)->DONE.
     {
         const std::vector<llama_token> start = {100};
         const std::vector<llama_token> end = {101};
         const std::vector<llama_token> forced = {102, 101};
         const std::vector<llama_token> sequence = {100, 50, 101, 100, 60, 61, 62, 63};
 
-        test_reasoning_budget("multi-block re-arms budget after DONE", sequence, {start}, {end}, forced,
-            2,      // budget of 2 tokens (per block)
+        test_reasoning_budget("second reasoning block is closed after DONE", sequence, {start}, {end}, forced,
+            2,      // budget for the single allowed block
             REASONING_BUDGET_IDLE,
-            6,      // forcing starts at i=6 (after second block exhausts at i=5)
-            7);     // forcing continues through i=7
+            4,      // forcing starts immediately after the second start tag
+            5);     // forcing continues through the configured close sequence
     }
 
     // Test 7: Multiple start sequences - the second sequence activates counting

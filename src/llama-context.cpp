@@ -3933,6 +3933,19 @@ void llama_memory_seq_add(
     mem->seq_add(seq_id, p0, p1, delta);
 }
 
+void llama_memory_seq_add_text(
+        llama_memory_t mem,
+          llama_seq_id seq_id,
+             llama_pos p0,
+             llama_pos p1,
+             llama_pos delta) {
+    if (!mem) {
+        return;
+    }
+
+    mem->seq_add_text(seq_id, p0, p1, delta);
+}
+
 void llama_memory_seq_div(
         llama_memory_t mem,
           llama_seq_id seq_id,
@@ -3972,6 +3985,22 @@ bool llama_memory_can_shift(llama_memory_t mem) {
     }
 
     return mem->get_can_shift();
+}
+
+bool llama_memory_can_shift_text(llama_memory_t mem) {
+    if (!mem) {
+        return false;
+    }
+
+    return mem->get_can_shift_text();
+}
+
+bool llama_memory_apply_pending_updates(llama_context * ctx, bool optimize) {
+    if (!ctx) {
+        return false;
+    }
+
+    return ctx->memory_update(optimize);
 }
 
 size_t llama_memory_get_cell_usage(
