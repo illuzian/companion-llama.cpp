@@ -2570,8 +2570,8 @@ private:
         if (slot.prompt.tokens.has_media() || slot.task->tokens.has_media()) {
             return reject("keeper_context_shift does not support media tokens");
         }
-        if (!llama_memory_can_shift(llama_get_memory(ctx_tgt)) ||
-            (ctx_dft && !llama_memory_can_shift(llama_get_memory(ctx_dft)))) {
+        if (!llama_memory_can_shift_text(llama_get_memory(ctx_tgt)) ||
+            (ctx_dft && !llama_memory_can_shift_text(llama_get_memory(ctx_dft)))) {
             return reject("keeper_context_shift is not supported by this context");
         }
 
@@ -2627,14 +2627,25 @@ private:
         }
 
         slot.mem.seq_rm(slot.id, static_cast<llama_pos>(plan.removal_start), static_cast<llama_pos>(removal_end));
-        slot.mem.seq_add(slot.id, static_cast<llama_pos>(removal_end), slot.prompt.tokens.pos_next(),
-                         -static_cast<llama_pos>(plan.discard_tokens));
+        slot.mem.seq_add_text(slot.id, static_cast<llama_pos>(removal_end), slot.prompt.tokens.pos_next(),
+                              -static_cast<llama_pos>(plan.discard_tokens));
+
+        // K-shift is normally lazy and runs at the next decode. Retirement can
+        // be a metadata-only zero-generation request, so make the rotation
+        // durable before acknowledging it. This also prevents a state save or
+        // checkpoint from pairing shifted positions with unrotated keys.
+        if (!llama_memory_apply_pending_updates(ctx_tgt, false) ||
+            (ctx_dft && !llama_memory_apply_pending_updates(ctx_dft, false))) {
+            slot.prompt_clear();
+            return reject("keeper_context_shift failed to apply the text-only memory update");
+        }
 
         slot.prompt.tokens.clear();
         slot.prompt.tokens.insert(retained_tokens);
 
-        // Checkpoint blobs contain the old positions and removed state. The
-        // prompt-only ingest immediately creates a fresh keeper-only checkpoint.
+        // Checkpoint blobs contain the old positions and removed state. A
+        // maintenance-only task keeps this list empty; an appended keeper
+        // continuation can checkpoint the fully shifted state normally.
         slot.prompt.checkpoints.clear();
         slot.last_keeper_context_shift = {
             true, plan.removal_start, plan.discard_tokens, logical_tokens_before, retained_tokens.size(),
@@ -3802,7 +3813,18 @@ private:
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
+                                if (pos_min >= pos_min_thold && slot.last_keeper_context_shift.applied) {
+                                    // The keeper maintenance request has already validated one
+                                    // text-only contiguous deletion and shifted the resident
+                                    // attention cache. Its recurrent state deliberately carries
+                                    // the retired history's compressed influence. Do not replace
+                                    // that state with a pre-retirement checkpoint or a full
+                                    // replay.
+                                    SLT_TRC(slot,
+                                            "preserving validated keeper state after text-only context retirement "
+                                            "(pos_min = %d, threshold = %d)\n",
+                                            pos_min, pos_min_thold);
+                                } else if (pos_min >= pos_min_thold) {
                                     // search for a context checkpoint
                                     const auto it = std::find_if(
                                         slot.prompt.checkpoints.rbegin(),
@@ -3853,6 +3875,25 @@ private:
                                     }
                                 }
                             }
+                        }
+
+                        if (slot.last_keeper_context_shift.applied && n_past == slot.task->n_tokens()) {
+                            // This is a true maintenance-only completion. The
+                            // shifted memory already represents the entire
+                            // retained prompt, and n_predict is required to be
+                            // zero. Do not fabricate a token evaluation merely
+                            // to obtain logits which the caller cannot consume.
+                            slot.n_prompt_tokens_cache     = n_past;
+                            slot.n_prompt_tokens_processed = 0;
+                            slot.t_prompt_processing = (ggml_time_us() - slot.t_start_process_prompt) / 1e3;
+                            slot.stop           = STOP_TYPE_LIMIT;
+                            slot.has_next_token = false;
+                            slot.i_batch        = -1;
+                            metrics.on_prompt_eval(slot);
+                            send_final_response(slot);
+                            metrics.on_prediction(slot);
+                            slot.release();
+                            return;
                         }
 
                         // [TAG_PROMPT_LOGITS]

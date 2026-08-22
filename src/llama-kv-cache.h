@@ -132,6 +132,7 @@ public:
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
     bool get_can_shift() const override;
+    bool get_can_shift_text() const override;
 
     void clear(bool data) override;
 
@@ -139,6 +140,11 @@ public:
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
+    void seq_add_text(
+            llama_seq_id seq_id,
+               llama_pos p0,
+               llama_pos p1,
+               llama_pos shift) override;
     void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) override;
 
     llama_pos seq_pos_min(llama_seq_id seq_id) const override;
@@ -312,6 +318,10 @@ private:
 
     std::vector<kv_layer> layers;
 
+    // True while the pending position deltas were requested through the
+    // narrower text-only shift API.
+    bool shift_text_only = false;
+
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
 
@@ -319,6 +329,13 @@ private:
 
     size_t size_k_bytes() const;
     size_t size_v_bytes() const;
+
+    void seq_add_impl(
+            llama_seq_id seq_id,
+               llama_pos p0,
+               llama_pos p1,
+               llama_pos shift,
+                    bool text_only);
 
     ggml_tensor * build_rope_shift(
             const llama_cparams & cparams,

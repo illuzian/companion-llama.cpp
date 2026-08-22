@@ -1639,6 +1639,16 @@ static void common_context_seq_add(llama_context * ctx, llama_seq_id seq_id, lla
     llama_memory_seq_add(mem, seq_id, p0, p1, delta);
 }
 
+static void common_context_seq_add_text(
+        llama_context * ctx,
+         llama_seq_id seq_id,
+            llama_pos p0,
+            llama_pos p1,
+            llama_pos delta) {
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_seq_add_text(mem, seq_id, p0, p1, delta);
+}
+
 void common_memory::init(llama_context * ctx_tgt, llama_context * ctx_dft) {
     this->ctx_tgt = ctx_tgt;
     this->ctx_dft = ctx_dft;
@@ -1662,6 +1672,13 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
     common_context_seq_add(ctx_tgt, seq_id, p0, p1, delta);
     if (ctx_dft) {
         common_context_seq_add(ctx_dft, seq_id, p0, p1, delta);
+    }
+}
+
+void common_memory::seq_add_text(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const {
+    common_context_seq_add_text(ctx_tgt, seq_id, p0, p1, delta);
+    if (ctx_dft) {
+        common_context_seq_add_text(ctx_dft, seq_id, p0, p1, delta);
     }
 }
 

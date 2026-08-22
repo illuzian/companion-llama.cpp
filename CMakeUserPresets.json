@@ -1,0 +1,47 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "companion-runtime",
+      "displayName": "Companion project-local llama.cpp runtime",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../build",
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "ON",
+        "CMAKE_BUILD_RPATH_USE_ORIGIN": "ON",
+        "CMAKE_BUILD_WITH_INSTALL_RPATH": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "/opt/rocm/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/rocm/llvm/bin/clang++",
+        "CMAKE_INSTALL_RPATH": "$ORIGIN",
+        "CMAKE_INSTALL_RPATH_USE_LINK_PATH": "OFF",
+        "GGML_HIP": "ON",
+        "GGML_HIP_GRAPHS": "ON",
+        "GGML_HIP_MMQ_MFMA": "ON",
+        "GGML_HIP_NO_VMM": "ON",
+        "GGML_HIP_RCCL": "OFF",
+        "LLAMA_BUILD_APP": "OFF",
+        "LLAMA_BUILD_EXAMPLES": "OFF",
+        "LLAMA_BUILD_SERVER": "ON",
+        "LLAMA_BUILD_TESTS": "ON",
+        "LLAMA_BUILD_TOOLS": "ON",
+        "LLAMA_BUILD_UI": "OFF",
+        "LLAMA_USE_PREBUILT_UI": "OFF",
+        "LLAMA_OPENSSL": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "companion-runtime",
+      "configurePreset": "companion-runtime",
+      "jobs": 2,
+      "targets": [
+        "llama-server",
+        "test-memory-cell-usage",
+        "test-server-shared-kv",
+        "test-reasoning-budget"
+      ]
+    }
+  ]
+}
