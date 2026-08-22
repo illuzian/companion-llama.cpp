@@ -2225,8 +2225,11 @@ private:
         queue_results.send(std::move(res));
     }
 
-    // Gate slot save/restore/erase on slot content (does it hold media),
-    // not model capability: a multimodal model may hold a pure-text slot.
+    // Gate slot serialization on slot content (does it hold media), not model
+    // capability: a multimodal model may hold a pure-text slot. Erasure is
+    // deliberately excluded from this gate. prompt_clear() owns both the
+    // multimodal prompt bookkeeping and the sequence memory, so refusing to
+    // erase a media-bearing ephemeral slot would make safe cleanup impossible.
     bool check_slot_no_media(const server_slot & slot, const int id_task) {
         if (slot.prompt.tokens.has_media()) {
             send_error(id_task,
@@ -2971,10 +2974,6 @@ private:
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
                         send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
-                        break;
-                    }
-                    // Gate on slot content, consistent with save/restore.
-                    if (!check_slot_no_media(*slot, task.id)) {
                         break;
                     }
                     if (slot->is_processing()) {

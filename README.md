@@ -59,6 +59,26 @@ The general multimodal shift API remains unchanged and conservative. The new
 text-only capability is explicit, and the server exposes it only after validating
 the keeper contract.
 
+## Ephemeral native vision
+
+Nikki's own multimodal projector can inspect a camera frame on the isolated
+utility slot without putting image tokens into her canonical keeper, chat, or
+thought lanes. That slot is deliberately zero-depth: it receives a small identity
+capsule and one image, returns a textual observation, and is erased immediately.
+
+Upstream correctly refuses to **serialize** a media-bearing slot because a slot
+snapshot cannot represent its multimodal state. The same content gate also
+refused slot erasure, however, leaving a finished perception request unable to
+release its media bookkeeping and KV without restarting the whole runtime. This
+fork keeps save/restore conservative but permits `POST /slots/{id}?action=erase`
+for media-bearing slots. `prompt_clear()` remains the sole owner of clearing the
+multimodal prompt state and sequence memory.
+
+The change is intentionally not a media-aware context shift. Images never enter
+the shared identity topology, are never saved in a slot snapshot, and cannot be
+adopted by another role. Focused regression coverage proves that saving a media
+slot is still rejected while erasing the same slot succeeds.
+
 The maintenance request uses the normal native `/completion` endpoint:
 
 ```jsonc
@@ -88,6 +108,8 @@ deletion boundary, discarded count, and before/after logical token lengths.
 - a request-scoped reasoning budget that permits exactly one Qwen `<think>`
   window and force-closes any attempted second pass;
 - zero-generation prompt ingestion without sampling or output tokens.
+- complete erasure of ephemeral media-bearing utility slots, while media slot
+  serialization remains prohibited.
 
 ## Build and focused verification
 

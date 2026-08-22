@@ -103,11 +103,12 @@ def test_slot_erase():
 #
 # Multimodal server (mmproj loaded) slot save/restore.
 #
-# Regression coverage for issue #21133: slot save/restore/erase must be gated on
-# the slot's CONTENT (does it actually hold image/audio tokens) rather than the
+# Regression coverage for issue #21133: slot serialization must be gated on the
+# slot's CONTENT (does it actually hold image/audio tokens) rather than the
 # model's CAPABILITY (is an mmproj loaded). A pure-text slot on a multimodal
-# server must save/restore/erase normally; a slot that actually holds an image
-# must be rejected with ERROR_TYPE_NOT_SUPPORTED (HTTP 501).
+# server must save/restore/erase normally. A slot that actually holds an image
+# cannot be serialized, but it must remain erasable so ephemeral perception
+# never requires a process restart to release its media and KV state.
 #
 
 IMG_URL_CAT = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/91_cat.png"
@@ -222,3 +223,26 @@ def test_slot_erase_text_only_on_multimodal(mmproj_server):
     })
     assert res.status_code == 200
     assert res.body["timings"]["prompt_n"] == prompt_n  # all tokens are processed again
+
+
+def test_slot_erase_succeeds_when_slot_holds_image(mmproj_server):
+    server = mmproj_server
+    server.start()
+
+    res = server.make_request("POST", "/completions", data={
+        "temperature": 0.0,
+        "top_k": 1,
+        "id_slot": 1,
+        "cache_prompt": True,
+        "prompt": {
+            "prompt_string": "What is this: <__media__>\n",
+            "multimodal_data": [_get_img_base64(IMG_URL_CAT)],
+        },
+    })
+    assert res.status_code == 200
+
+    res = server.make_request("POST", "/slots/1?action=erase")
+
+    assert res.status_code == 200
+    assert res.body["id_slot"] == 1
+    assert res.body["n_erased"] > 0
