@@ -9,6 +9,7 @@
 #endif
 
 #include <cmath>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <string>
@@ -361,6 +362,30 @@ static void test_utf8_boundary_detection() {
 int main(void) {
     // Reasoning budget sampler tests
     printf("Testing reasoning budget sampler... ");
+
+    // A prefill longer than the generated allowance initializes the active
+    // block under an unlimited startup budget. Generation then receives the
+    // full request allowance without allowing prefill to force the block shut.
+    {
+        const std::vector<llama_token> start = {100};
+        const std::vector<llama_token> end = {101};
+        const std::vector<llama_token> forced = {102, 101};
+        auto * sampler = common_reasoning_budget_init(nullptr, {start}, {end}, forced, INT_MAX);
+
+        llama_sampler_accept(sampler, 100);
+        llama_sampler_accept(sampler, 50);
+        llama_sampler_accept(sampler, 51);
+        llama_sampler_accept(sampler, 52);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_COUNTING);
+
+        common_reasoning_budget_begin_generation(sampler, 2);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_COUNTING);
+        llama_sampler_accept(sampler, 60);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_COUNTING);
+        llama_sampler_accept(sampler, 61);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
+        llama_sampler_free(sampler);
+    }
 
     // Test 1: Basic budget with start/end tokens - no forcing (natural end before budget exhausted)
     {

@@ -357,17 +357,28 @@ json server_task_result_cmpl_final::to_json_non_oaicompat() {
         {"timings",             stats.to_json()},
     };
     if (!stream && !probs_output.empty()) {
-        res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
+        res["completion_probabilities"] =
+            completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
     }
-    return response_fields.empty() ? res : json_get_nested_values(response_fields, res);
+    json response = response_fields.empty() ? std::move(res) : json_get_nested_values(response_fields, res);
+    if (keeper_context_shift) {
+        response["keeper_context_shift"] = {
+            { "applied",               keeper_context_shift->applied               },
+            { "removal_start",         keeper_context_shift->removal_start         },
+            { "discarded_tokens",      keeper_context_shift->discarded_tokens      },
+            { "logical_tokens_before", keeper_context_shift->logical_tokens_before },
+            { "logical_tokens_after",  keeper_context_shift->logical_tokens_after  },
+        };
+    }
+    return response;
 }
 
 json server_task_result_cmpl_final::usage_json_oaicompat() {
-    return json {
-        {"completion_tokens", n_decoded},
-        {"prompt_tokens",     n_prompt_tokens},
-        {"total_tokens",      n_decoded + n_prompt_tokens},
-        {"prompt_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
+    return json{
+        { "completion_tokens",     n_decoded                                          },
+        { "prompt_tokens",         n_prompt_tokens                                    },
+        { "total_tokens",          n_decoded + n_prompt_tokens                        },
+        { "prompt_tokens_details", json{ { "cached_tokens", n_prompt_tokens_cache } } },
     };
 }
 

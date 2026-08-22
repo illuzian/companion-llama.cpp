@@ -43,6 +43,13 @@ struct llama_sampler * common_reasoning_budget_init(
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
 
+// Start counting generated reasoning with the requested allowance after
+// prompt-owned generation-prefix tokens have initialized the sampler state. A
+// prefix that already closed its reasoning block remains DONE.
+void common_reasoning_budget_begin_generation(
+        struct llama_sampler * smpl,
+        int32_t                  generated_budget);
+
 // The end sequence that transitioned the sampler to DONE, or nullptr if none
 // was recorded. Cleared when a new start sequence re-arms the sampler.
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);

@@ -287,6 +287,7 @@ struct common_params_sampling {
     // reasoning budget sampler parameters
     // these are populated by the server/CLI based on chat template params
     int32_t                   reasoning_budget_tokens   = -1;  // -1 = disabled, >= 0 = token budget
+    bool                      reasoning_budget_excludes_prefill = false; // request budget applies only to generated reasoning
     std::vector<llama_token>  reasoning_budget_start;          // start tag token sequence
     std::vector<llama_tokens> reasoning_budget_end;            // end tag token sequences; the first tag is used as the forcing sequence
     std::vector<llama_token>  reasoning_budget_forced;         // forced sequence (message + first end tag)

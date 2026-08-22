@@ -682,6 +682,29 @@ llama_pos llama_kv_cache::seq_pos_max(llama_seq_id seq_id) const {
     return cells.seq_pos_max(seq_id);
 }
 
+std::vector<llama_memory_cell_usage> llama_kv_cache::get_cell_usage(llama_seq_id seq_id) const {
+    if (layers.empty()) {
+        return {};
+    }
+
+    llama_memory_cell_usage total = {};
+    total.type = LLAMA_MEMORY_CELL_TYPE_ATTENTION;
+
+    for (const llama_kv_cells & cells : v_cells) {
+        const llama_memory_cell_usage current = cells.get_cell_usage(seq_id);
+        total.capacity_cells += current.capacity_cells;
+        total.occupied_cells += current.occupied_cells;
+        total.sequence_references += current.sequence_references;
+        total.duplicate_sequence_references += current.duplicate_sequence_references;
+        total.shared_cells += current.shared_cells;
+        total.sequence_cells += current.sequence_cells;
+        total.sequence_shared_cells += current.sequence_shared_cells;
+        total.sequence_exclusive_cells += current.sequence_exclusive_cells;
+    }
+
+    return { total };
+}
+
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> ret;
     for (const auto & [ctx, buf] : ctxs_bufs) {

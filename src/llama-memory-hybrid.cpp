@@ -179,6 +179,13 @@ llama_pos llama_memory_hybrid::seq_pos_max(llama_seq_id seq_id) const {
     return std::min(mem_attn->seq_pos_max(seq_id), mem_recr->seq_pos_max(seq_id));
 }
 
+std::vector<llama_memory_cell_usage> llama_memory_hybrid::get_cell_usage(llama_seq_id seq_id) const {
+    std::vector<llama_memory_cell_usage> result = mem_attn->get_cell_usage(seq_id);
+    const std::vector<llama_memory_cell_usage> recurrent = mem_recr->get_cell_usage(seq_id);
+    result.insert(result.end(), recurrent.begin(), recurrent.end());
+    return result;
+}
+
 std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = mem_attn->memory_breakdown();
     for (const auto & buft_size : mem_recr->memory_breakdown()) {

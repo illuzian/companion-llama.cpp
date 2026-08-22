@@ -41,6 +41,8 @@ struct mock_memory : public llama_memory_i {
         return it == ranges.end() ? -1 : it->second.second;
     }
 
+    std::vector<llama_memory_cell_usage> get_cell_usage(llama_seq_id) const override { return {}; }
+
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override { return {}; }
 
     void state_write(llama_io_write_i &, llama_seq_id, llama_state_seq_flags) const override { GGML_ASSERT(false && "not implemented"); }

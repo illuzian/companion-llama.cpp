@@ -403,6 +403,43 @@ llama_pos llama_memory_recurrent::seq_pos_max(llama_seq_id seq_id) const {
     return result;
 }
 
+std::vector<llama_memory_cell_usage> llama_memory_recurrent::get_cell_usage(llama_seq_id seq_id) const {
+    if (r_l.empty() && s_l.empty()) {
+        return {};
+    }
+
+    llama_memory_cell_usage result = {};
+    result.type = LLAMA_MEMORY_CELL_TYPE_RECURRENT;
+    result.capacity_cells = cells.size();
+
+    for (const mem_cell & cell : cells) {
+        if (cell.is_empty()) {
+            continue;
+        }
+
+        const uint64_t reference_count = cell.seq_id.size();
+        ++result.occupied_cells;
+        result.sequence_references += reference_count;
+        if (reference_count > 1) {
+            ++result.shared_cells;
+            result.duplicate_sequence_references += reference_count - 1;
+        }
+
+        if (seq_id < 0 || !cell.has_seq_id(seq_id)) {
+            continue;
+        }
+
+        ++result.sequence_cells;
+        if (reference_count > 1) {
+            ++result.sequence_shared_cells;
+        } else {
+            ++result.sequence_exclusive_cells;
+        }
+    }
+
+    return { result };
+}
+
 void llama_memory_recurrent::set_rs_idx(llama_seq_id seq_id, uint32_t idx) {
     if (seq_id < 0) {
         std::fill(rs_idx.begin(), rs_idx.end(), 0);

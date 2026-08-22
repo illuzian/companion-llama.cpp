@@ -86,6 +86,36 @@ public:
         return used.size();
     }
 
+    llama_memory_cell_usage get_cell_usage(llama_seq_id sequence_id) const {
+        llama_memory_cell_usage result = {};
+        result.capacity_cells = size();
+
+        const bool include_sequence = sequence_id >= 0 && sequence_id < LLAMA_MAX_SEQ;
+        for (const uint32_t index : used) {
+            const uint64_t reference_count = seq[index].count();
+
+            ++result.occupied_cells;
+            result.sequence_references += reference_count;
+            if (reference_count > 1) {
+                ++result.shared_cells;
+                result.duplicate_sequence_references += reference_count - 1;
+            }
+
+            if (!include_sequence || !seq[index].test(sequence_id)) {
+                continue;
+            }
+
+            ++result.sequence_cells;
+            if (reference_count > 1) {
+                ++result.sequence_shared_cells;
+            } else {
+                ++result.sequence_exclusive_cells;
+            }
+        }
+
+        return result;
+    }
+
     // the index of the first cell that is used
     // return 0 if no cells are used
     uint32_t used_min() const {

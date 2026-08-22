@@ -1,42 +1,150 @@
 #include "server-context.h"
-#include "server-chat.h"
-#include "server-common.h"
-#include "server-http.h"
-#include "server-task.h"
-#include "server-queue.h"
-#include "server-schema.h"
-#include "server-stream.h"
 
 #include "build-info.h"
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
-#include "sampling.h"
-#include "speculative.h"
-#include "mtmd.h"
 #include "mtmd-helper.h"
+#include "mtmd.h"
+#include "sampling.h"
+#include "server-chat.h"
+#include "server-common.h"
+#include "server-http.h"
+#include "server-queue.h"
+#include "server-schema.h"
+#include "server-shared-kv.h"
+#include "server-stream.h"
+#include "server-task.h"
+#include "speculative.h"
 
 #include <algorithm>
-#include <cstddef>
 #include <cinttypes>
+#include <cstddef>
+#include <cstdlib>
 #include <exception>
-#include <memory>
 #include <filesystem>
 #include <random>
-#include <utility>
 #include <fstream>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 
 // fix problem with std::min and std::max
 #if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#   define NOMINMAX
-#endif
-#include <windows.h>
+#    define WIN32_LEAN_AND_MEAN
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
 #endif
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static const char * server_memory_cell_type_name(llama_memory_cell_type type) {
+    switch (type) {
+        case LLAMA_MEMORY_CELL_TYPE_ATTENTION: return "attention";
+        case LLAMA_MEMORY_CELL_TYPE_RECURRENT: return "recurrent";
+        case LLAMA_MEMORY_CELL_TYPE_UNKNOWN:   return "unknown";
+    }
+
+    return "unknown";
+}
+
+struct server_physical_kv_summary {
+    std::vector<llama_memory_cell_usage> components;
+
+    uint64_t capacity_cells                 = 0;
+    uint64_t occupied_cells                 = 0;
+    uint64_t sequence_references            = 0;
+    uint64_t duplicate_sequence_references  = 0;
+    uint64_t shared_cells                   = 0;
+    uint64_t sequence_cells                 = 0;
+    uint64_t sequence_shared_cells          = 0;
+    uint64_t sequence_exclusive_cells       = 0;
+
+    json to_json() const {
+        json component_values = json::array();
+        for (const llama_memory_cell_usage & component : components) {
+            component_values.push_back({
+                { "index",                         component.component_index                       },
+                { "type",                          server_memory_cell_type_name(component.type)   },
+                { "capacity_cells",                component.capacity_cells                       },
+                { "occupied_cells",                component.occupied_cells                       },
+                { "sequence_references",           component.sequence_references                  },
+                { "duplicate_sequence_references", component.duplicate_sequence_references        },
+                { "shared_cells",                  component.shared_cells                         },
+                { "sequence_cells",                component.sequence_cells                       },
+                { "sequence_shared_cells",         component.sequence_shared_cells                },
+                { "sequence_exclusive_cells",      component.sequence_exclusive_cells             },
+            });
+        }
+
+        return {
+            { "capacity_cells",                capacity_cells                       },
+            { "occupied_cells",                occupied_cells                       },
+            { "sequence_references",           sequence_references                  },
+            { "duplicate_sequence_references", duplicate_sequence_references        },
+            { "shared_cells",                  shared_cells                         },
+            { "sequence_cells",                sequence_cells                       },
+            { "sequence_shared_cells",         sequence_shared_cells                },
+            { "sequence_exclusive_cells",      sequence_exclusive_cells             },
+            { "components",                    std::move(component_values)           },
+        };
+    }
+};
+
+static server_physical_kv_summary server_physical_kv_usage(llama_context * ctx, llama_seq_id seq_id) {
+    server_physical_kv_summary result;
+    llama_memory_t memory = llama_get_memory(ctx);
+    const size_t component_count = llama_memory_get_cell_usage(memory, seq_id, nullptr, 0);
+    result.components.resize(component_count);
+    const size_t observed_count = llama_memory_get_cell_usage(
+        memory,
+        seq_id,
+        result.components.data(),
+        result.components.size());
+    GGML_ASSERT(observed_count == component_count);
+
+    for (const llama_memory_cell_usage & component : result.components) {
+        result.capacity_cells += component.capacity_cells;
+        result.occupied_cells += component.occupied_cells;
+        result.sequence_references += component.sequence_references;
+        result.duplicate_sequence_references += component.duplicate_sequence_references;
+        result.shared_cells += component.shared_cells;
+        result.sequence_cells += component.sequence_cells;
+        result.sequence_shared_cells += component.sequence_shared_cells;
+        result.sequence_exclusive_cells += component.sequence_exclusive_cells;
+    }
+
+    return result;
+}
+
+struct server_physical_kv_adoption {
+    bool observed = false;
+    server_physical_kv_summary before;
+    server_physical_kv_summary after;
+
+    json to_json() const {
+        if (!observed) {
+            return nullptr;
+        }
+
+        return {
+            { "before", before.to_json() },
+            { "after",  after.to_json()  },
+            { "occupied_cells_delta",
+              static_cast<int64_t>(after.occupied_cells) - static_cast<int64_t>(before.occupied_cells) },
+            { "sequence_references_delta",
+              static_cast<int64_t>(after.sequence_references) -
+                  static_cast<int64_t>(before.sequence_references) },
+            { "duplicate_sequence_references_delta",
+              static_cast<int64_t>(after.duplicate_sequence_references) -
+                  static_cast<int64_t>(before.duplicate_sequence_references) },
+        };
+    }
+};
 
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (params.embedding ||
@@ -274,6 +382,11 @@ struct server_slot {
     // effective generation limit for the current task, -1 means unlimited
     int32_t n_predict_max = -1;
 
+    server_shared_kv_observation            last_shared_kv_adoption;
+    server_physical_kv_adoption             last_physical_kv_adoption;
+    server_keeper_context_shift_observation last_keeper_context_shift;
+    int32_t                                 checkpoint_cap_effective = 0;
+
     size_t last_nl_pos = 0;
 
     std::string  generated_text;
@@ -326,6 +439,8 @@ struct server_slot {
         bool res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
         if (!res) {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");
+        } else {
+            server_apply_checkpoint_cap(prompt.checkpoints, checkpoint_cap_effective);
         }
 
         return res;
@@ -687,16 +802,37 @@ struct server_slot {
         json res;
 
         res = {
-            {"id",            id},
-            {"n_ctx",         n_ctx},
-            {"speculative",   can_speculate()},
-            {"is_processing", is_processing()},
+            { "id",            id              },
+            { "n_ctx",         n_ctx           },
+            { "speculative",   can_speculate() },
+            { "is_processing", is_processing() },
+        };
+
+        res["shared_kv"] = {
+            { "last_donor_slot",
+             last_shared_kv_adoption.donor_slot >= 0 ? json(last_shared_kv_adoption.donor_slot) : json(nullptr) },
+            { "last_adopted_prefix_length", last_shared_kv_adoption.adopted_prefix_length },
+            { "logical_prompt_tokens", prompt.tokens.size() },
+            { "checkpoint_cap_effective", checkpoint_cap_effective },
+            { "checkpoint_count", prompt.checkpoints.size() },
+            { "physical_kv", server_physical_kv_usage(ctx_tgt, id).to_json() },
+            { "last_adoption_physical", last_physical_kv_adoption.to_json() },
+            { "last_keeper_context_shift",
+             last_keeper_context_shift.applied ?
+                  json{
+                      { "applied", true },
+                      { "removal_start", last_keeper_context_shift.removal_start },
+                      { "discarded_tokens", last_keeper_context_shift.discarded_tokens },
+                      { "logical_tokens_before", last_keeper_context_shift.logical_tokens_before },
+                      { "logical_tokens_after", last_keeper_context_shift.logical_tokens_after },
+                  } :
+                  json(nullptr) },
         };
 
         const auto & ptask = task ? task : task_prev;
 
         if (ptask) {
-            res["id_task"] = ptask->id;
+            res["id_task"]                   = ptask->id;
             res["n_prompt_tokens"]           = (int32_t) prompt.tokens.size();
             res["n_prompt_tokens_processed"] = stats.n_prompt_processed;
             res["n_prompt_tokens_cache"]     = stats.n_prompt_cached;
@@ -730,6 +866,7 @@ struct server_slot {
         other.stats = stats;
 
         other.prompt = prompt.clone();
+        server_apply_checkpoint_cap(other.prompt.checkpoints, other.checkpoint_cap_effective);
         other.init_sampler();
     }
 };
@@ -906,11 +1043,11 @@ private:
     // slots / clients
     std::vector<server_slot> slots;
 
-    int trace = 0;        // env: LLAMA_TRACE
-    int slots_debug = 0;  // env: LLAMA_SERVER_SLOTS_DEBUG
-    int slots_n_diff = 0; // env: LLAMA_SERVER_SLOTS_N_DIFF
-
-    int n_empty_consecutive = 0;
+    int     trace                  = 0; // env: LLAMA_TRACE
+    int     slots_debug            = 0; // env: LLAMA_SERVER_SLOTS_DEBUG
+    int     slots_n_diff           = 0; // env: LLAMA_SERVER_SLOTS_N_DIFF
+    int     n_empty_consecutive    = 0;
+    int32_t checkpoint_keeper_slot = -1;
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
@@ -1237,6 +1374,21 @@ private:
 
         slots.clear();
 
+        checkpoint_keeper_slot = -1;
+        if (const char * value = std::getenv("LLAMA_CHECKPOINT_SLOT")) {
+            try {
+                size_t    parsed      = 0;
+                const int parsed_slot = std::stoi(value, &parsed);
+                if (value[parsed] != '\0' || !server_slot_id_is_valid(parsed_slot, params_base.n_parallel, false)) {
+                    throw std::invalid_argument("out of range");
+                }
+                checkpoint_keeper_slot = parsed_slot;
+            } catch (const std::exception &) {
+                SRV_ERR("LLAMA_CHECKPOINT_SLOT must identify an existing slot, got '%s'\n", value);
+                return false;
+            }
+        }
+
         ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
@@ -1291,8 +1443,10 @@ private:
             slot.ctx_tgt = ctx_tgt;
             slot.ctx_dft = ctx_dft;
             slot.mem.init(ctx_tgt, ctx_dft);
-            slot.spec    = spec.get();
-            slot.n_ctx   = n_ctx_slot();
+            slot.spec = spec.get();
+            slot.n_ctx = n_ctx_slot();
+            slot.checkpoint_cap_effective =
+                server_effective_checkpoint_cap(params_base.n_ctx_checkpoints, checkpoint_keeper_slot, slot.id);
 
             slot.mctx                   = mctx;
             slot.prompt.tokens.has_mtmd = mctx != nullptr;
@@ -1498,7 +1652,9 @@ private:
                     SRV_INF("%s", "chat template supports preserving reasoning, consider enabling it via --reasoning-preserve\n");
                 }
                 if (!supported && enabled) {
-                    SRV_WRN("%s", "chat template does NOT support preserving reasoning, --reasoning-preserve has no effect\n");
+                    SRV_WRN(
+                        "%s",
+                        "chat template does NOT support preserving reasoning, --reasoning-preserve has no effect\n");
                 }
             }
         }
@@ -1507,8 +1663,9 @@ private:
     }
 
     server_slot * get_slot_by_id(int id_slot) {
-        // note: allow id_slot to be out of bounds (wrap around)
-        id_slot = id_slot % slots.size();
+        if (!server_slot_id_is_valid(id_slot, slots.size(), false)) {
+            return nullptr;
+        }
 
         for (server_slot & slot : slots) {
             if (slot.id == id_slot) {
@@ -1806,11 +1963,14 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
-        slot.task = std::make_unique<const server_task>(std::move(task));
+        slot.last_shared_kv_adoption   = {};
+        slot.last_physical_kv_adoption = {};
+        slot.last_keeper_context_shift = {};
+        slot.task                      = std::make_unique<const server_task>(std::move(task));
 
-        slot.state = slot.task->is_child()
-            ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
-            : SLOT_STATE_STARTED;
+        slot.state = slot.task->is_child() ? SLOT_STATE_WAIT_OTHER  // wait for the parent to process prompt
+                                             :
+                                             SLOT_STATE_STARTED;
 
         // reset server kill-switch counter
         n_empty_consecutive = 0;
@@ -2090,11 +2250,11 @@ private:
 
         // in stream mode, content and tokens are already in last partial chunk
         if (slot.task->params.stream) {
-            res->content     = "";
-            res->tokens      = llama_tokens{};
+            res->content = "";
+            res->tokens  = llama_tokens{};
         } else {
-            res->content     = std::move(slot.generated_text);
-            res->tokens      = std::move(slot.generated_tokens);
+            res->content = std::move(slot.generated_text);
+            res->tokens  = std::move(slot.generated_tokens);
         }
         res->stats           = slot.stats;
         res->prompt          = slot.task->tokens.detokenize(ctx_tgt, true);
@@ -2109,6 +2269,10 @@ private:
         res->stopping_word         = slot.stopping_word;
         res->stop                  = slot.stop;
         res->post_sampling_probs   = slot.task->params.post_sampling_probs;
+        if (slot.task->params.keeper_context_shift) {
+            GGML_ASSERT(slot.last_keeper_context_shift.applied);
+            res->keeper_context_shift = slot.last_keeper_context_shift;
+        }
 
         res->verbose           = slot.task->params.verbose;
         res->stream            = slot.task->params.stream;
@@ -2296,39 +2460,22 @@ private:
 
     // n_tokens_cur: the number of tokens added to the batch for the current slot
     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
-        // NIKKI PATCH (2026-08-10, rev 2): full checkpoint depth on the
-        // SHARED slot only; a SMALL allowance elsewhere. Rev 1 gave mirrors
-        // ZERO and full-reprocess returned by the back door: recurrent (GDN)
-        // state cannot rewind without a checkpoint at/below the cut, so a
-        // mirror whose own cache was AHEAD of the keeper (keeper refresh
-        // lags ~a cycle under load) could no longer truncate to the common
-        // prefix — measured: lcp_own=54,616 yet a full 55k/46s reprocess.
-        // The original sin stays fixed: 32 checkpoints x 62.813 MiB x 3
-        // mirror slots was ~6 GiB of GTT spill (decode 60 -> 18 t/s).
-        // LLAMA_CHECKPOINT_SLOT=<id> gets the full --ctx-checkpoints depth;
-        // other slots are capped at LLAMA_CHECKPOINT_OTHERS (default 4).
-        // Both unset -> upstream behaviour.
-        int ckpt_cap = params_base.n_ctx_checkpoints;
-        {
-            static const char * ckpt_slot_env = getenv("LLAMA_CHECKPOINT_SLOT");
-            static const int    ckpt_slot     = ckpt_slot_env ? atoi(ckpt_slot_env) : -1;
-            static const char * ckpt_oth_env  = getenv("LLAMA_CHECKPOINT_OTHERS");
-            static const int    ckpt_others   = ckpt_oth_env ? atoi(ckpt_oth_env) : 4;
-            if (ckpt_slot >= 0 && slot.id != ckpt_slot) {
-                ckpt_cap = std::min(ckpt_cap, ckpt_others);
-                if (ckpt_cap <= 0) {
-                    return;
-                }
-            }
+        // When LLAMA_CHECKPOINT_SLOT identifies a keeper, only that slot owns
+        // persistent checkpoints. Mirrors adopt shared memory and retain none.
+        const int32_t ckpt_cap = slot.checkpoint_cap_effective;
+        if (ckpt_cap <= 0) {
+            return;
         }
         const int id_task = slot.task->id;
 
         // evict checkpoints within min-step of a previous checkpoint, unless they were
         // created by the current task
         int64_t last = -1;
-        for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end(); ) {
+        for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
             if (it->id_task != id_task && last >= 0 && it->n_tokens <= last + params_base.checkpoint_min_step) {
-                SLT_TRC(slot, "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                SLT_TRC(slot,
+                        "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens "
+                        "= %" PRId64 ", size = %.3f MiB)\n",
                         it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
 
                 it = slot.prompt.checkpoints.erase(it);
@@ -2343,7 +2490,9 @@ private:
             // make room for the new checkpoint, if needed
             const auto & cur = slot.prompt.checkpoints.front();
 
-            SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+            SLT_WRN(slot,
+                    "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64
+                    ", size = %.3f MiB)\n",
                     cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
 
             slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
@@ -2364,9 +2513,135 @@ private:
         common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
 
         SLT_TRC(slot,
-                "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
-                (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
-                cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+                "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64
+                ", size = %.3f MiB)\n",
+                (int) slot.prompt.checkpoints.size(), ckpt_cap, cur.pos_min, cur.pos_max, cur.n_tokens,
+                (float) cur.size() / 1024 / 1024);
+    }
+
+    bool enforce_shared_kv_expectation(server_slot & slot) {
+        const auto mismatch =
+            server_shared_kv_check_expectation(slot.task->params.shared_kv_expectation, slot.last_shared_kv_adoption);
+        if (mismatch == server_shared_kv_mismatch::none) {
+            return true;
+        }
+
+        std::string message;
+        if (mismatch == server_shared_kv_mismatch::donor_slot) {
+            message = string_format("shared KV donor mismatch: expected slot %d, observed %d",
+                                    *slot.task->params.shared_kv_expectation.donor_slot,
+                                    slot.last_shared_kv_adoption.donor_slot);
+        } else {
+            message = string_format("shared KV adopted prefix mismatch: expected %zu tokens, observed %zu",
+                                    *slot.task->params.shared_kv_expectation.adopted_prefix_length,
+                                    slot.last_shared_kv_adoption.adopted_prefix_length);
+        }
+
+        send_error(slot, message, ERROR_TYPE_INVALID_REQUEST);
+        slot.release();
+        return false;
+    }
+
+    bool apply_keeper_context_shift(server_slot & slot) {
+        const auto & requested = slot.task->params.keeper_context_shift;
+        if (!requested) {
+            return true;
+        }
+
+        auto reject = [&](const std::string & message) {
+            send_error(slot, message, ERROR_TYPE_INVALID_REQUEST);
+            slot.release();
+            return false;
+        };
+
+        if (checkpoint_keeper_slot < 0 || slot.id != checkpoint_keeper_slot ||
+            slot.task->id_slot != checkpoint_keeper_slot) {
+            return reject("keeper_context_shift requires the configured keeper slot");
+        }
+        if (slot.task->type != SERVER_TASK_TYPE_COMPLETION || slot.task->params.res_type != TASK_RESPONSE_TYPE_NONE ||
+            slot.task->params.n_predict != 0 || !slot.task->params.cache_prompt || slot.task->params.n_cmpl != 1 ||
+            slot.task->params.stream) {
+            return reject("keeper_context_shift requires one raw prompt-only cached completion");
+        }
+        if (slot.task->params.shared_kv_expectation.donor_slot ||
+            slot.task->params.shared_kv_expectation.adopted_prefix_length) {
+            return reject("keeper_context_shift cannot carry a shared-KV adoption expectation");
+        }
+        if (slot.prompt.tokens.has_media() || slot.task->tokens.has_media()) {
+            return reject("keeper_context_shift does not support media tokens");
+        }
+        if (!llama_memory_can_shift(llama_get_memory(ctx_tgt)) ||
+            (ctx_dft && !llama_memory_can_shift(llama_get_memory(ctx_dft)))) {
+            return reject("keeper_context_shift is not supported by this context");
+        }
+
+        for (const int32_t mirror_slot_id : requested->mirror_slot_ids) {
+            server_slot * mirror = get_slot_by_id(mirror_slot_id);
+            GGML_ASSERT(mirror != nullptr);
+            const auto physical = server_physical_kv_usage(ctx_tgt, mirror->id);
+            if (mirror->is_processing() || !mirror->prompt.tokens.empty() || physical.sequence_cells != 0) {
+                return reject(
+                    string_format("keeper_context_shift requires mirror slot %d to be idle and empty", mirror->id));
+            }
+        }
+
+        const auto keeper_physical = server_physical_kv_usage(ctx_tgt, slot.id);
+        if (keeper_physical.sequence_shared_cells != 0) {
+            return reject("keeper_context_shift requires the keeper to have no shared cells");
+        }
+
+        const llama_tokens cached_tokens = slot.prompt.tokens.get_text_tokens();
+        const llama_tokens input_tokens  = slot.task->tokens.get_text_tokens();
+        const auto         plan = server_keeper_context_shift_plan_for(*requested, cached_tokens, input_tokens);
+        if (plan.mismatch != server_keeper_context_shift_mismatch::none) {
+            const char * detail = "unknown";
+            switch (plan.mismatch) {
+                case server_keeper_context_shift_mismatch::none:
+                    break;
+                case server_keeper_context_shift_mismatch::cached_length:
+                    detail = "cached token length mismatch";
+                    break;
+                case server_keeper_context_shift_mismatch::bounds:
+                    detail = "invalid protected prefix or input bound";
+                    break;
+                case server_keeper_context_shift_mismatch::substitution:
+                    detail = "new prompt is not one contiguous deletion";
+                    break;
+                case server_keeper_context_shift_mismatch::ambiguous:
+                    detail = "contiguous deletion boundary is ambiguous";
+                    break;
+            }
+            return reject(string_format("keeper_context_shift rejected: %s", detail));
+        }
+
+        const size_t logical_tokens_before = cached_tokens.size();
+        const size_t removal_end           = plan.removal_start + plan.discard_tokens;
+        llama_tokens retained_tokens;
+        retained_tokens.reserve(cached_tokens.size() - plan.discard_tokens);
+        retained_tokens.insert(retained_tokens.end(), cached_tokens.begin(),
+                               cached_tokens.begin() + plan.removal_start);
+        retained_tokens.insert(retained_tokens.end(), cached_tokens.begin() + removal_end, cached_tokens.end());
+        if (retained_tokens.size() > input_tokens.size() ||
+            !std::equal(retained_tokens.begin(), retained_tokens.end(), input_tokens.begin())) {
+            return reject("keeper_context_shift retained-prefix validation failed");
+        }
+
+        slot.mem.seq_rm(slot.id, static_cast<llama_pos>(plan.removal_start), static_cast<llama_pos>(removal_end));
+        slot.mem.seq_add(slot.id, static_cast<llama_pos>(removal_end), slot.prompt.tokens.pos_next(),
+                         -static_cast<llama_pos>(plan.discard_tokens));
+
+        slot.prompt.tokens.clear();
+        slot.prompt.tokens.insert(retained_tokens);
+
+        // Checkpoint blobs contain the old positions and removed state. The
+        // prompt-only ingest immediately creates a fresh keeper-only checkpoint.
+        slot.prompt.checkpoints.clear();
+        slot.last_keeper_context_shift = {
+            true, plan.removal_start, plan.discard_tokens, logical_tokens_before, retained_tokens.size(),
+        };
+        SLT_INF(slot, "keeper context shift, removal_start = %zu, discarded = %zu, logical tokens = %zu -> %zu\n",
+                plan.removal_start, plan.discard_tokens, logical_tokens_before, retained_tokens.size());
+        return true;
     }
 
     // returns false to decline the task, it is offered again after the decode is done
@@ -2392,6 +2667,17 @@ private:
                     }
 
                     const int id_task = task.id;
+
+                    if (!server_slot_id_is_valid(task.id_slot, slots.size(), true)) {
+                        send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
+                    const auto & expected_donor = task.params.shared_kv_expectation.donor_slot;
+                    if (expected_donor && !server_slot_id_is_valid(*expected_donor, slots.size(), false)) {
+                        send_error(task, "Invalid expected shared KV donor slot", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
 
                     server_slot * slot = get_available_slot(task);
 
@@ -3174,12 +3460,17 @@ private:
 
                         // TODO: support memory-less logits computation
                         if (slot.task->need_logits() && !llama_get_memory(ctx_tgt)) {
-                            send_error(slot, "the current context does not logits computation. skipping", ERROR_TYPE_SERVER);
+                            send_error(slot, "the current context does not logits computation. skipping",
+                                       ERROR_TYPE_SERVER);
                             slot.release();
                             return;
                         }
 
                         if (!slot.can_split()) {
+                            if (!enforce_shared_kv_expectation(slot)) {
+                                return;
+                            }
+
                             if (slot.task->n_tokens() > n_ubatch) {
                                 send_error(slot,
                                            string_format(
@@ -3212,6 +3503,10 @@ private:
                                 return;
                             }
 
+                            if (!apply_keeper_context_shift(slot)) {
+                                return;
+                            }
+
                             if (slot.task->params.cache_prompt) {
                                 // CROSS-SLOT PREFIX ADOPTION (unified KV only): if another idle
                                 // slot's cache shares a longer prefix with this prompt than our
@@ -3221,12 +3516,11 @@ private:
                                 // the two sequences) — see llama_kv_cache::seq_cp, s0 == s1 path.
                                 // Donors with multimodal chunks are skipped: keep_first() throws
                                 // on a mid-image cut, and text lanes are the target use case.
-                                SLT_INF(slot, "adoption: kv_unified=%d n_slots=%d\n",
-                                        (int) params_base.kv_unified, (int) slots.size());
-                                if (params_base.kv_unified) {
+                                SLT_INF(slot, "adoption: kv_unified=%d n_slots=%d\n", (int) params_base.kv_unified,
+                                        (int) slots.size());
+                                if (params_base.kv_unified && !slot.task->params.keeper_context_shift) {
                                     const size_t lcp_own = slot.prompt.tokens.get_common_prefix(input_tokens);
-                                    SLT_INF(slot, "adoption: lcp_own=%zu input=%zu\n",
-                                            lcp_own, input_tokens.size());
+                                    SLT_INF(slot, "adoption: lcp_own=%zu input=%zu\n", lcp_own, input_tokens.size());
 
                                     server_slot * donor    = nullptr;
                                     size_t        lcp_best = lcp_own;
@@ -3326,11 +3620,42 @@ private:
                                     }
 
                                     if (donor != nullptr) {
-                                        SLT_INF(slot, "adopting shared prefix from slot %d: %zu tokens (own cache matched %zu)\n",
-                                                donor->id, lcp_best, lcp_own);
+                                        SLT_INF(
+                                            slot,
+                                            "adopting shared prefix from slot %d: %zu tokens (own cache matched %zu)\n",
+                                            donor->id, lcp_best, lcp_own);
+
+                                        server_physical_kv_adoption physical_adoption;
+                                        physical_adoption.observed = true;
+                                        physical_adoption.before = server_physical_kv_usage(ctx_tgt, slot.id);
 
                                         slot.mem.seq_rm(slot.id, -1, -1);
                                         slot.mem.seq_cp(donor->id, slot.id, 0, (llama_pos) lcp_best);
+                                        physical_adoption.after = server_physical_kv_usage(ctx_tgt, slot.id);
+                                        slot.last_physical_kv_adoption = std::move(physical_adoption);
+                                        slot.last_shared_kv_adoption = {
+                                            donor->id,
+                                            lcp_best,
+                                        };
+
+                                        const auto & physical = slot.last_physical_kv_adoption;
+                                        SLT_INF(
+                                            slot,
+                                            "physical shared-KV adoption: occupied %" PRIu64 " -> %" PRIu64
+                                            ", references %" PRIu64 " -> %" PRIu64
+                                            ", duplicate references %" PRIu64 " -> %" PRIu64
+                                            ", sequence cells %" PRIu64 " -> %" PRIu64
+                                            ", shared sequence cells %" PRIu64 " -> %" PRIu64 "\n",
+                                            physical.before.occupied_cells,
+                                            physical.after.occupied_cells,
+                                            physical.before.sequence_references,
+                                            physical.after.sequence_references,
+                                            physical.before.duplicate_sequence_references,
+                                            physical.after.duplicate_sequence_references,
+                                            physical.before.sequence_cells,
+                                            physical.after.sequence_cells,
+                                            physical.before.sequence_shared_cells,
+                                            physical.after.sequence_shared_cells);
 
                                         // adopt tokens only — deliberately NOT donor->prompt.clone():
                                         // that would deep-copy the donor's checkpoint blobs (tens of
@@ -3413,6 +3738,10 @@ private:
                             } else {
                                 // if we don't cache the prompt, we have to remove all previous tokens
                                 n_past = 0;
+                            }
+
+                            if (!enforce_shared_kv_expectation(slot)) {
+                                return;
                             }
 
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
@@ -3576,15 +3905,18 @@ private:
                     // processed without the adapter in a separate batch, then
                     // the adapter needs to be enabled for the remaining tokens.
                     if (lora_all_alora(slot.lora) && slot.alora_invocation_start - 1 > slot.prompt.n_tokens()) {
-                        SLT_DBG(slot, "processing pre-alora tokens without the adapter (n_tokens = %d, alora_invocation_start = %d)\n", slot.prompt.n_tokens(), slot.alora_invocation_start);
+                        SLT_DBG(slot,
+                                "processing pre-alora tokens without the adapter (n_tokens = %d, "
+                                "alora_invocation_start = %d)\n",
+                                slot.prompt.n_tokens(), slot.alora_invocation_start);
                         const auto & enabled_loras = lora_get_enabled_ids(slot.lora);
                         GGML_ASSERT(enabled_loras.size() == 1);
-                        alora_scale = slot.lora[enabled_loras[0]].scale;
+                        alora_scale                       = slot.lora[enabled_loras[0]].scale;
                         slot.lora[enabled_loras[0]].scale = 0.0f;
-                        alora_disabled_id = enabled_loras[0];
+                        alora_disabled_id                 = enabled_loras[0];
                     }
 
-                    bool do_checkpoint = params_base.n_ctx_checkpoints > 0;
+                    bool do_checkpoint = slot.checkpoint_cap_effective > 0;
 
                     // make checkpoints only for completion tasks
                     do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
@@ -3959,6 +4291,20 @@ private:
                 }
 
                 GGML_ASSERT(slot.task->need_sampling());
+
+                // A zero prediction budget is an explicit prompt-only cache
+                // ingest. Finish after prompt evaluation and before sampler
+                // state is touched or a token is emitted.
+                if (!slot.has_budget(params_base)) {
+                    slot.stop           = STOP_TYPE_LIMIT;
+                    slot.has_next_token = false;
+                    slot.i_batch        = -1;
+                    metrics.on_prompt_eval(slot);
+                    send_final_response(slot);
+                    metrics.on_prediction(slot);
+                    slot.release();
+                    return;
+                }
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;
@@ -4448,6 +4794,89 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params.message_spans = task.tokens.find_message_spans(delimiters);
 
             task.id_slot = json_value(data, "id_slot", -1);
+            if (!server_slot_id_is_valid(task.id_slot, params.n_parallel, true)) {
+                throw std::invalid_argument("id_slot must be -1 or identify an existing slot");
+            }
+
+            if (data.contains("expected_shared_kv_donor_slot")) {
+                const auto & value = data.at("expected_shared_kv_donor_slot");
+                if (!value.is_number_integer()) {
+                    throw std::invalid_argument("expected_shared_kv_donor_slot must be an integer");
+                }
+
+                const int64_t donor_slot = value.get<int64_t>();
+                if (donor_slot < std::numeric_limits<int32_t>::min() ||
+                    donor_slot > std::numeric_limits<int32_t>::max() ||
+                    !server_slot_id_is_valid(donor_slot, params.n_parallel, false)) {
+                    throw std::invalid_argument("expected_shared_kv_donor_slot must identify an existing slot");
+                }
+                task.params.shared_kv_expectation.donor_slot = static_cast<int32_t>(donor_slot);
+            }
+
+            if (data.contains("expected_shared_kv_adopted_prefix_length")) {
+                const auto & value = data.at("expected_shared_kv_adopted_prefix_length");
+                if (!value.is_number_integer()) {
+                    throw std::invalid_argument("expected_shared_kv_adopted_prefix_length must be an integer");
+                }
+
+                const int64_t prefix_length = value.get<int64_t>();
+                if (prefix_length < 0 || prefix_length > meta->slot_n_ctx) {
+                    throw std::invalid_argument("expected_shared_kv_adopted_prefix_length must fit the slot context");
+                }
+                task.params.shared_kv_expectation.adopted_prefix_length = static_cast<size_t>(prefix_length);
+            }
+
+            if (data.contains("keeper_context_shift")) {
+                const auto & value = data.at("keeper_context_shift");
+                if (!value.is_object() || value.size() != 3 || !value.contains("protected_prefix_tokens") ||
+                    !value.contains("expected_cached_tokens") || !value.contains("mirror_slot_ids")) {
+                    throw std::invalid_argument(
+                        "keeper_context_shift must contain protected_prefix_tokens, "
+                        "expected_cached_tokens, and mirror_slot_ids exactly");
+                }
+
+                const auto & protected_value = value.at("protected_prefix_tokens");
+                const auto & cached_value    = value.at("expected_cached_tokens");
+                if (!protected_value.is_number_integer() || !cached_value.is_number_integer()) {
+                    throw std::invalid_argument("keeper_context_shift token lengths must be integers");
+                }
+                const int64_t protected_prefix_tokens = protected_value.get<int64_t>();
+                const int64_t expected_cached_tokens  = cached_value.get<int64_t>();
+                if (protected_prefix_tokens <= 0 || expected_cached_tokens <= protected_prefix_tokens ||
+                    expected_cached_tokens > meta->slot_n_ctx) {
+                    throw std::invalid_argument(
+                        "keeper_context_shift token lengths must fit the cached keeper context");
+                }
+
+                const auto & mirror_values = value.at("mirror_slot_ids");
+                if (!mirror_values.is_array() || mirror_values.empty()) {
+                    throw std::invalid_argument("keeper_context_shift mirror_slot_ids must be a non-empty array");
+                }
+                std::vector<int32_t> mirror_slot_ids;
+                mirror_slot_ids.reserve(mirror_values.size());
+                for (const auto & mirror_value : mirror_values) {
+                    if (!mirror_value.is_number_integer()) {
+                        throw std::invalid_argument("keeper_context_shift mirror slot IDs must be integers");
+                    }
+                    const int64_t mirror_slot_id = mirror_value.get<int64_t>();
+                    if (!server_slot_id_is_valid(mirror_slot_id, params.n_parallel, false) ||
+                        mirror_slot_id == task.id_slot) {
+                        throw std::invalid_argument(
+                            "keeper_context_shift mirror slot IDs must identify non-keeper slots");
+                    }
+                    if (std::find(mirror_slot_ids.begin(), mirror_slot_ids.end(),
+                                  static_cast<int32_t>(mirror_slot_id)) != mirror_slot_ids.end()) {
+                        throw std::invalid_argument("keeper_context_shift mirror slot IDs must be unique");
+                    }
+                    mirror_slot_ids.push_back(static_cast<int32_t>(mirror_slot_id));
+                }
+
+                task.params.keeper_context_shift = server_keeper_context_shift{
+                    static_cast<size_t>(protected_prefix_tokens),
+                    static_cast<size_t>(expected_cached_tokens),
+                    std::move(mirror_slot_ids),
+                };
+            }
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat
@@ -4898,7 +5327,9 @@ void server_routes::init_routes() {
     this->post_slots = [this](const server_http_req & req) {
         auto res = create_response();
         if (params.slot_save_path.empty()) {
-            res->error(format_error_response("This server does not support slots action. Start it with `--slot-save-path`", ERROR_TYPE_NOT_SUPPORTED));
+            res->error(
+                format_error_response("This server does not support slots action. Start it with `--slot-save-path`",
+                                      ERROR_TYPE_NOT_SUPPORTED));
             return res;
         }
 
@@ -4906,8 +5337,17 @@ void server_routes::init_routes() {
 
         int id_slot;
         try {
-            id_slot = std::stoi(id_slot_str);
+            size_t parsed = 0;
+            id_slot       = std::stoi(id_slot_str, &parsed);
+            if (parsed != id_slot_str.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
         } catch (const std::exception &) {
+            res->error(format_error_response("Invalid slot ID", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
+        if (!server_slot_id_is_valid(id_slot, params.n_parallel, false)) {
             res->error(format_error_response("Invalid slot ID", ERROR_TYPE_INVALID_REQUEST));
             return res;
         }
