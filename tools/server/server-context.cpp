@@ -1780,10 +1780,9 @@ private:
         }
 
         if (ret) {
-            update_cache = update_cache && prompt_cache;
-
-            // cache prompts only for completion tasks
-            update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+            update_cache = server_may_replace_resident_prompt_from_host_cache(
+                update_cache, prompt_cache != nullptr, task.type == SERVER_TASK_TYPE_COMPLETION,
+                task.params.keeper_context_shift.has_value());
 
             if (update_cache) {
                 SRV_TRC("%s", "updating prompt cache\n");
