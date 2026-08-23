@@ -57,7 +57,10 @@ the exact hybrid state and remain the preferred normal recovery path.
 
 The general multimodal shift API remains unchanged and conservative. The new
 text-only capability is explicit, and the server exposes it only after validating
-the keeper contract.
+the keeper contract. A keeper-shift request also pins the exact resident keeper
+prompt for validation: the generic host prompt cache cannot replace that slot
+with an older cached prompt before the expected length and deletion plan are
+checked.
 
 ## Ephemeral native vision
 

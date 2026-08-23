@@ -44,6 +44,17 @@ struct server_keeper_context_shift_plan {
     size_t                               discard_tokens = 0;
 };
 
+inline bool server_may_replace_resident_prompt_from_host_cache(bool update_requested,
+                                                               bool prompt_cache_available,
+                                                               bool completion_task,
+                                                               bool keeper_context_shift_requested) {
+    // A keeper shift is validated against the exact resident prompt named by
+    // expected_cached_tokens. Replacing that prompt from the host cache before
+    // validation can swap in an older logical context and manufacture a stale
+    // cached-length mismatch.
+    return update_requested && prompt_cache_available && completion_task && !keeper_context_shift_requested;
+}
+
 template <typename CachedTokens, typename InputTokens>
 server_keeper_context_shift_plan server_keeper_context_shift_plan_for(const server_keeper_context_shift & shift,
                                                                       const CachedTokens &                cached_tokens,

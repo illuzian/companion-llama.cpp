@@ -129,6 +129,14 @@ static void test_keeper_context_shift_planning() {
            server_keeper_context_shift_mismatch::bounds);
 }
 
+static void test_keeper_shift_preserves_resident_prompt() {
+    assert(server_may_replace_resident_prompt_from_host_cache(true, true, true, false));
+    assert(!server_may_replace_resident_prompt_from_host_cache(true, true, true, true));
+    assert(!server_may_replace_resident_prompt_from_host_cache(false, true, true, false));
+    assert(!server_may_replace_resident_prompt_from_host_cache(true, false, true, false));
+    assert(!server_may_replace_resident_prompt_from_host_cache(true, true, false, false));
+}
+
 int main() {
     test_checkpoint_caps();
     test_checkpoint_retention();
@@ -136,5 +144,6 @@ int main() {
     test_expectations();
     test_zero_generation_ingest_budget();
     test_keeper_context_shift_planning();
+    test_keeper_shift_preserves_resident_prompt();
     return 0;
 }
