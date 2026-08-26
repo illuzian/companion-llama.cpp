@@ -732,6 +732,14 @@ bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl) {
     return common_reasoning_budget_force(gsmpl->rbudget);
 }
 
+bool common_sampler_reasoning_protocol_violated(const struct common_sampler * gsmpl) {
+    if (!gsmpl) {
+        return false;
+    }
+
+    return common_reasoning_budget_protocol_violated(gsmpl->rbudget);
+}
+
 // helpers
 
 llama_token_data_array * common_sampler_get_candidates(struct common_sampler * gsmpl, bool do_sort) {

@@ -57,3 +57,7 @@ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sa
 // Manually transition the reasoning budget sampler into the FORCING state.
 // Returns true if the transition occurred.
 bool common_reasoning_budget_force(struct llama_sampler * smpl);
+
+// True after generated tokens contain a second reasoning delimiter. Prompt
+// tokens initialize the state but never set this flag.
+bool common_reasoning_budget_protocol_violated(const struct llama_sampler * smpl);
