@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cctype>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
@@ -42,6 +43,29 @@
 using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static bool companion_request_id_is_safe(const std::string & value) {
+    if (value.size() != 36) {
+        return false;
+    }
+    for (size_t i = 0; i < value.size(); ++i) {
+        const bool hyphen = i == 8 || i == 13 || i == 18 || i == 23;
+        if (hyphen ? value[i] != '-' : !std::isxdigit(static_cast<unsigned char>(value[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t count_occurrences(const std::string & value, const std::string & needle) {
+    size_t count = 0;
+    size_t offset = 0;
+    while ((offset = value.find(needle, offset)) != std::string::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
 
 static const char * server_memory_cell_type_name(llama_memory_cell_type type) {
     switch (type) {
@@ -4344,6 +4368,14 @@ private:
 
             common_sampler_accept(slot.smpl.get(), id, true);
 
+            if (common_sampler_reasoning_protocol_violated(slot.smpl.get())) {
+                SLT_ERR(slot, "%s", "reasoning protocol violation; terminating request\n");
+                send_error(slot, "reasoning protocol violation", ERROR_TYPE_SERVER);
+                metrics.on_prediction(slot);
+                slot.release();
+                return;
+            }
+
             // here we have synchronized the llama_context (due to the sampling above), so we can do time measurement
             const int64_t t_now = ggml_time_us();
 
@@ -4400,6 +4432,14 @@ private:
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
                 auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
                 slot.spec_i_batch.clear();
+
+                if (common_sampler_reasoning_protocol_violated(slot.smpl.get())) {
+                    SLT_ERR(slot, "%s", "reasoning protocol violation; terminating request\n");
+                    send_error(slot, "reasoning protocol violation", ERROR_TYPE_SERVER);
+                    metrics.on_prediction(slot);
+                    slot.release();
+                    return;
+                }
 
                 GGML_ASSERT(accepted.size() >= 1);
 
@@ -4644,10 +4684,40 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
 
         if (!params.path_prompts_log_dir.empty()) {
-            const auto file_path = std::filesystem::path(params.path_prompts_log_dir) / string_format("%012" PRId64 ".txt", ggml_time_ms());
+            const std::string request_id = json_value(data, "companion_request_id", std::string());
+            const bool request_id_safe = companion_request_id_is_safe(request_id);
+            if (!request_id.empty() && !request_id_safe) {
+                SRV_WRN("%s", "ignored unsafe companion_request_id in prompt trace\n");
+            }
+            const std::string trace_name = request_id_safe
+                ? string_format("%012" PRId64 "-%s", ggml_time_ms(), request_id.c_str())
+                : string_format("%012" PRId64, ggml_time_ms());
+            const auto trace_root = std::filesystem::path(params.path_prompts_log_dir);
+            const auto file_path = trace_root / (trace_name + ".prompt.txt");
+            const std::string prompt_text = prompt.is_string() ? prompt.get<std::string>() : prompt.dump(2);
             std::ofstream f(file_path);
             if (f) {
-                f << (prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
+                f << prompt_text;
+                const std::string generation_prompt = json_value(data, "generation_prompt", std::string());
+                const json metadata = {
+                    { "schema_version", 1 },
+                    { "companion_request_id", request_id_safe ? json(request_id) : json(nullptr) },
+                    { "prompt_chars", prompt_text.size() },
+                    { "generation_prompt_chars", generation_prompt.size() },
+                    { "generation_prompt_think_open_count", count_occurrences(generation_prompt, "<think>") },
+                    { "generation_prompt_think_close_count", count_occurrences(generation_prompt, "</think>") },
+                };
+                std::ofstream metadata_file(trace_root / (trace_name + ".meta.json"));
+                if (metadata_file) {
+                    metadata_file << metadata.dump(2) << '\n';
+                } else {
+                    SRV_ERR("failed to create prompt trace metadata for %s\n", trace_name.c_str());
+                }
+                SRV_INF(
+                    "companion.prompt_trace_written request_id=%s prompt_chars=%zu generation_prompt_chars=%zu\n",
+                    request_id_safe ? request_id.c_str() : "none",
+                    prompt_text.size(),
+                    generation_prompt.size());
             } else {
                 SRV_ERR("failed to create %s\n", file_path.string().c_str());
             }

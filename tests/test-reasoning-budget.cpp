@@ -280,9 +280,9 @@ static void test_reasoning_budget_end_match() {
         GGML_ASSERT(matched != nullptr);
         GGML_ASSERT(*matched == llama_tokens({103, 104}));
 
-        llama_sampler_accept(sampler, 100); // attempted re-open, FORCING
-        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
-        GGML_ASSERT(common_reasoning_budget_get_end_match(sampler) == nullptr);
+        llama_sampler_accept(sampler, 100); // attempted second opener
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        GGML_ASSERT(common_reasoning_budget_protocol_violated(sampler));
 
         llama_sampler_free(sampler);
     }
@@ -333,6 +333,20 @@ static void test_reasoning_budget_end_match() {
 
     // a null sampler is safely ignored
     GGML_ASSERT(common_reasoning_budget_get_end_match(nullptr) == nullptr);
+    GGML_ASSERT(!common_reasoning_budget_protocol_violated(nullptr));
+
+    // A repeated close after one natural close is also a terminal protocol
+    // violation. This is the exact delimiter topology from the 2026-08-26
+    // prefill-copy incident.
+    {
+        auto * sampler = common_reasoning_budget_init(nullptr, start, end, {102, 101}, 5);
+        llama_sampler_accept(sampler, 100);
+        llama_sampler_accept(sampler, 101);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        llama_sampler_accept(sampler, 101);
+        GGML_ASSERT(common_reasoning_budget_protocol_violated(sampler));
+        llama_sampler_free(sampler);
+    }
 
     fprintf(stderr, "  Test 'matched end sequence' passed\n");
 }
@@ -465,24 +479,22 @@ int main(void) {
     }
 
     // Test 6: A response gets exactly one reasoning window. The first block
-    // ends naturally at i=2. A second start tag at i=3 is closed immediately,
-    // without granting another budget or another reasoning pass.
+    // ends naturally at i=2. A second start tag at i=3 is detected without
+    // forcing synthetic output or granting another reasoning pass.
     // Flow: i=0 accept(100)->COUNTING rem=2; i=1 accept(50)->rem=1;
     //       i=2 accept(101)->end_matcher matches, DONE;
-    //       i=3 accept(100)->FORCING;
-    //       i=4 apply()->forces token[0]=102, accept(60)->force_pos=1;
-    //       i=5 apply()->forces token[1]=101, accept(61)->DONE.
+    //       i=3 accept(100)->DONE + protocol violation.
     {
         const std::vector<llama_token> start = {100};
         const std::vector<llama_token> end = {101};
         const std::vector<llama_token> forced = {102, 101};
         const std::vector<llama_token> sequence = {100, 50, 101, 100, 60, 61, 62, 63};
 
-        test_reasoning_budget("second reasoning block is closed after DONE", sequence, {start}, {end}, forced,
+        test_reasoning_budget("second reasoning block is rejected after DONE", sequence, {start}, {end}, forced,
             2,      // budget for the single allowed block
             REASONING_BUDGET_IDLE,
-            4,      // forcing starts immediately after the second start tag
-            5);     // forcing continues through the configured close sequence
+            SIZE_MAX,
+            SIZE_MAX);
     }
 
     // Test 7: Multiple start sequences - the second sequence activates counting

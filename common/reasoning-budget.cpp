@@ -65,6 +65,8 @@ struct common_reasoning_budget_ctx {
     size_t force_pos;         // next position in forced_tokens to force
 
     int32_t end_match;        // index into end_matcher.seqs of the sequence that transitioned to DONE, -1 if none
+
+    bool protocol_violated;   // generated a second start or end delimiter
 };
 
 static const char * common_reasoning_budget_name(const struct llama_sampler * /*smpl*/) {
@@ -144,18 +146,14 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
             break;
         }
         case REASONING_BUDGET_DONE:
-            // FIX(2026-08-20): a response gets exactly ONE reasoning window.
-            // Re-arming used to grant further windows (originally a full
-            // fresh budget each), letting a degenerate loop re-open its
-            // reasoning and consume reply tokens. She never gets the
-            // opportunity to re-reason: any later start tag is force-closed
-            // immediately, and the event logs at WRN so it is visible.
-            if (ctx->start_matcher.advance(token) >= 0) {
-                ctx->state = REASONING_BUDGET_FORCING;
-                ctx->force_pos = 0;
-                ctx->end_matcher.reset();
-                ctx->end_match = -1;
-                COM_WRN("%s", "reasoning re-opened after its window ended; forcing immediate close\n");
+            // A response gets exactly one reasoning window. Repairing a
+            // second opener by injecting another closer created additional
+            // malformed channel text. Detect both possible delimiters and
+            // let the server terminate the request without synthesizing any
+            // token or asking the model to repair its own protocol.
+            if (ctx->start_matcher.advance(token) >= 0 || ctx->end_matcher.advance(token) >= 0) {
+                ctx->protocol_violated = true;
+                COM_WRN("%s", "reasoning protocol violated after its window ended\n");
             }
             break;
     }
@@ -191,6 +189,7 @@ static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
     ctx->end_matcher.reset();
     ctx->force_pos = 0;
     ctx->end_match = -1;
+    ctx->protocol_violated = false;
 }
 
 static struct llama_sampler * common_reasoning_budget_init_state(
@@ -250,6 +249,7 @@ static struct llama_sampler * common_reasoning_budget_init_state(
             /* .state         = */ initial_state,
             /* .force_pos     = */ 0,
             /* .end_match     = */ -1,
+            /* .protocol_violated = */ false,
         }
     );
 }
@@ -330,4 +330,12 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
     COM_TRC("%s", "forced into forcing state (manual transition)\n");
 
     return true;
+}
+
+bool common_reasoning_budget_protocol_violated(const struct llama_sampler * smpl) {
+    if (!smpl) {
+        return false;
+    }
+
+    return ((const common_reasoning_budget_ctx *) smpl->ctx)->protocol_violated;
 }

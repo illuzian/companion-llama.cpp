@@ -109,10 +109,22 @@ deletion boundary, discarded count, and before/after logical token lengths.
 - durable keeper slot save/load support used by the companion supervisor;
 - physical memory accounting for attention and recurrent components;
 - a request-scoped reasoning budget that permits exactly one Qwen `<think>`
-  window and force-closes any attempted second pass;
-- zero-generation prompt ingestion without sampling or output tokens.
+  window, then rejects a second opener or closer without synthesizing repair
+  tokens;
+- opt-in final-prompt traces correlated to the application's durable request
+  UUID, with content-free sidecar metadata describing the rendered reasoning
+  head topology;
+- zero-generation prompt ingestion without sampling or output tokens;
 - complete erasure of ephemeral media-bearing utility slots, while media slot
   serialization remains prohibited.
+
+The reasoning guard is intentionally narrower than application policy. Python
+chooses and validates the legal reasoning head; the Jinja template serializes
+that exact value. This fork sees the final rendered prompt and sampled tokens,
+so it provides the last-line invariant and forensic evidence: after one
+reasoning window has ended, another `<think>` or `</think>` terminates the
+request. It never guesses which content was private, injects another delimiter,
+or retries the model.
 
 ## Build and focused verification
 
