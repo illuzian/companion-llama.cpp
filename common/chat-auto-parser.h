@@ -222,6 +222,7 @@ struct tool_id_analysis {
 
 struct analyze_content;
 struct analyze_reasoning;
+struct analyze_tools;
 
 struct parser_build_context {
     common_chat_peg_builder & p;
@@ -230,6 +231,9 @@ struct parser_build_context {
     bool                              extracting_reasoning = false;
     const analyze_reasoning *         reasoning            = nullptr;
     const analyze_content *           content              = nullptr;
+    // Set before the reasoning parser is built so reasoning can stop at a
+    // tool-call marker (companion_app reasoning-breaks-on-toolcall patch).
+    const analyze_tools *             tools                = nullptr;
 
     parser_build_context(common_chat_peg_builder & p, const generation_params & inputs);
 };

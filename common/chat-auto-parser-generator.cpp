@@ -125,6 +125,9 @@ common_peg_arena autoparser::build_parser(const generation_params & inputs, cons
         ctx.extracting_reasoning = extract_reasoning && reasoning.mode != reasoning_mode::NONE;
         ctx.content              = &content;
         ctx.reasoning            = &reasoning;
+        // Available to the reasoning builder so it can stop reasoning at a
+        // tool-call marker (reasoning-breaks-on-toolcall patch).
+        ctx.tools                = &tools;
 
         // Build reasoning parser
         ctx.reasoning_parser = reasoning.build_parser(ctx);
@@ -160,14 +163,51 @@ common_peg_parser analyze_reasoning::build_parser(parser_build_context & ctx) co
         return p.eps();
     }
 
+    // A well-formed tool call the model emits BEFORE closing its reasoning
+    // must still be parsed natively. Without this, p.until(</think>)
+    // greedily consumes the whole call as reasoning text and it never
+    // reaches the tool parser. llama.cpp already handles exactly this for
+    // Kimi K2 (common_chat_params_init_kimi_k2: reasoning stops at the
+    // tool-call markers, </think> optional); this brings the generic
+    // auto-parser to parity. Patch: companion_app scripts/patches/
+    // llama-server-reasoning-breaks-on-toolcall.patch (Anthony, 2026-08-10:
+    // "if she makes legitimate calls in her thinking they need to be
+    // honoured ... she shouldn't need to account for that").
+    std::vector<std::string> reason_stops;
+    if (ctx.tools != nullptr) {
+        for (const auto & marker : { ctx.tools->format.section_start,
+                                     ctx.tools->format.per_call_start }) {
+            if (!marker.empty()) {
+                reason_stops.push_back(marker);
+            }
+        }
+    }
+
     if (mode == reasoning_mode::TAG_BASED || mode == reasoning_mode::TOOLS_ONLY) {
         if (!end.empty()) {
+            const std::string end_tag = trim_whitespace(end);
+            if (!reason_stops.empty()) {
+                // Stop reasoning at </think> OR a tool-call marker; make
+                // the closing tag optional so an unclosed-but-then-calling
+                // turn still parses. Matches the Kimi K2 treatment.
+                std::vector<std::string> stops = reason_stops;
+                stops.push_back(end_tag);
+                // until_one_of stops BEFORE the marker (does not consume);
+                // the optional literal then absorbs </think> when present.
+                // Same shape as the Kimi K2 parser.
+                auto body = p.reasoning(p.until_one_of(stops)) +
+                            p.optional(p.literal(end_tag));
+                if (!start.empty()) {
+                    return p.optional(p.optspace(start) + body);
+                }
+                return p.optional(body);
+            }
             if (!start.empty()) {
                 // Standard tag-based: optional(<think>reasoning</think>)
-                return p.optional(p.optspace(start) + p.reasoning(p.until(trim_whitespace(end))) + p.optspace(end));
+                return p.optional(p.optspace(start) + p.reasoning(p.until(end_tag)) + p.optspace(end));
             }
             // Delimiter-style (empty start)
-            return p.optional(p.reasoning(p.until(trim_whitespace(end))) + p.optspace(end));
+            return p.optional(p.reasoning(p.until(end_tag)) + p.optspace(end));
         }
     }
 

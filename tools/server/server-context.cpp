@@ -2296,6 +2296,31 @@ private:
 
     // n_tokens_cur: the number of tokens added to the batch for the current slot
     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
+        // NIKKI PATCH (2026-08-10, rev 2): full checkpoint depth on the
+        // SHARED slot only; a SMALL allowance elsewhere. Rev 1 gave mirrors
+        // ZERO and full-reprocess returned by the back door: recurrent (GDN)
+        // state cannot rewind without a checkpoint at/below the cut, so a
+        // mirror whose own cache was AHEAD of the keeper (keeper refresh
+        // lags ~a cycle under load) could no longer truncate to the common
+        // prefix — measured: lcp_own=54,616 yet a full 55k/46s reprocess.
+        // The original sin stays fixed: 32 checkpoints x 62.813 MiB x 3
+        // mirror slots was ~6 GiB of GTT spill (decode 60 -> 18 t/s).
+        // LLAMA_CHECKPOINT_SLOT=<id> gets the full --ctx-checkpoints depth;
+        // other slots are capped at LLAMA_CHECKPOINT_OTHERS (default 4).
+        // Both unset -> upstream behaviour.
+        int ckpt_cap = params_base.n_ctx_checkpoints;
+        {
+            static const char * ckpt_slot_env = getenv("LLAMA_CHECKPOINT_SLOT");
+            static const int    ckpt_slot     = ckpt_slot_env ? atoi(ckpt_slot_env) : -1;
+            static const char * ckpt_oth_env  = getenv("LLAMA_CHECKPOINT_OTHERS");
+            static const int    ckpt_others   = ckpt_oth_env ? atoi(ckpt_oth_env) : 4;
+            if (ckpt_slot >= 0 && slot.id != ckpt_slot) {
+                ckpt_cap = std::min(ckpt_cap, ckpt_others);
+                if (ckpt_cap <= 0) {
+                    return;
+                }
+            }
+        }
         const int id_task = slot.task->id;
 
         // evict checkpoints within min-step of a previous checkpoint, unless they were
@@ -2314,7 +2339,7 @@ private:
             ++it;
         }
 
-        while (slot.prompt.checkpoints.size() >= (size_t) params_base.n_ctx_checkpoints) {
+        while (slot.prompt.checkpoints.size() >= (size_t) ckpt_cap) {
             // make room for the new checkpoint, if needed
             const auto & cur = slot.prompt.checkpoints.front();
 
@@ -3188,6 +3213,107 @@ private:
                             }
 
                             if (slot.task->params.cache_prompt) {
+                                // CROSS-SLOT PREFIX ADOPTION (unified KV only): if another idle
+                                // slot's cache shares a longer prefix with this prompt than our
+                                // own cache does, adopt that prefix via seq_cp. Under a unified
+                                // KV buffer all sequences live in one stream, so seq_cp is a
+                                // cells-metadata update (zero-copy, cells become shared between
+                                // the two sequences) — see llama_kv_cache::seq_cp, s0 == s1 path.
+                                // Donors with multimodal chunks are skipped: keep_first() throws
+                                // on a mid-image cut, and text lanes are the target use case.
+                                SLT_INF(slot, "adoption: kv_unified=%d n_slots=%d\n",
+                                        (int) params_base.kv_unified, (int) slots.size());
+                                if (params_base.kv_unified) {
+                                    const size_t lcp_own = slot.prompt.tokens.get_common_prefix(input_tokens);
+                                    SLT_INF(slot, "adoption: lcp_own=%zu input=%zu\n",
+                                            lcp_own, input_tokens.size());
+
+                                    server_slot * donor    = nullptr;
+                                    size_t        lcp_best = lcp_own;
+
+                                    for (server_slot & other : slots) {
+                                        // NOT has_mtmd: that flag is set from `mctx != nullptr`, i.e.
+                                        // whether the SERVER has an mmproj loaded, NOT whether this
+                                        // slot holds media. With --mmproj it is true on EVERY slot,
+                                        // so the original guard skipped every donor unconditionally
+                                        // and adoption could never fire — measured 2026-08-07: an
+                                        // 81,541-token pure-prefix donor and an idle 442-token
+                                        // borrower still took a full re-ingest. The real hazard is
+                                        // keep_first() cutting mid-image, so test actual CONTENT.
+                                        SLT_INF(slot, "adoption: cand slot %d size=%zu proc=%d media=%d\n",
+                                                other.id, other.prompt.tokens.size(),
+                                                (int) other.is_processing(),
+                                                (int) (other.prompt.tokens.find_next_media_chunk(0).first != nullptr));
+                                        if (other.id == slot.id || other.is_processing()
+                                                || other.prompt.tokens.find_next_media_chunk(0).first != nullptr) {
+                                            continue;
+                                        }
+                                        const size_t lcp = other.prompt.tokens.get_common_prefix(input_tokens);
+                                        SLT_INF(slot, "adoption: cand slot %d lcp=%zu (need >%zu, ancestor %d)\n",
+                                                other.id, lcp, lcp_best,
+                                                (int) !(lcp + 1 < other.prompt.tokens.size()));
+                                        // PURE-ANCESTOR DONORS ONLY: the donor's entire cache must
+                                        // be a prefix of the new prompt (slack 1 for a trailing
+                                        // sampled token). A donor that has diverged past the match
+                                        // carries recurrent/SWA state PAST the fork point, which
+                                        // cannot be rewound — adoption then silently degrades to a
+                                        // full reprocess (measured). The append-only shared lane
+                                        // always satisfies this; diverged sibling mirrors never do.
+                                        if (lcp + 1 < other.prompt.tokens.size()) {
+                                            continue;
+                                        }
+                                        // ADOPT ON TIE (>=), not only on strict improvement.
+                                        // A WARM MIRROR'S OWN CACHE ALWAYS TIES THE KEEPER'S
+                                        // MATCH — both share the same trunk prefix — so under
+                                        // `>` the mirror keeps its PRIVATE copy of that trunk
+                                        // forever and sharing never converges. That is why
+                                        // adoption logged zero events in steady state even with
+                                        // a warm, valid donor: nothing was ever strictly better.
+                                        //
+                                        // With `>=` the mirror drops its own cells (seq_rm frees
+                                        // whatever it exclusively owned) and splices onto the
+                                        // donor's, so all slots converge onto ONE physical copy
+                                        // of the trunk. Re-adopting when already converged is a
+                                        // no-op: seq_rm removes this seq's bit, seq_cp puts it
+                                        // back, cells the donor still holds never free.
+                                        //
+                                        // The repair must be IDEMPOTENT AND ALWAYS ALLOWED or it
+                                        // cannot self-heal: "already as good as the donor" and
+                                        // "already sharing with the donor" are indistinguishable
+                                        // from lcp alone. That also makes donor loss survivable —
+                                        // any pure-ancestor slot can re-seed the others, so a
+                                        // purged keeper costs one re-ingest instead of permanent
+                                        // thrash. lcp > 0 so an empty donor never triggers a
+                                        // pointless seq_rm; on a tie prefer the LARGEST donor,
+                                        // which is the most complete trunk to share.
+                                        const bool strictly_better = lcp > lcp_best;
+                                        const bool tie_prefer_bigger =
+                                            lcp == lcp_best && lcp > 0 &&
+                                            (donor == nullptr ||
+                                             other.prompt.tokens.size() > donor->prompt.tokens.size());
+                                        if (strictly_better || tie_prefer_bigger) {
+                                            lcp_best = lcp;
+                                            donor    = &other;
+                                        }
+                                    }
+
+                                    if (donor != nullptr) {
+                                        SLT_INF(slot, "adopting shared prefix from slot %d: %zu tokens (own cache matched %zu)\n",
+                                                donor->id, lcp_best, lcp_own);
+
+                                        slot.mem.seq_rm(slot.id, -1, -1);
+                                        slot.mem.seq_cp(donor->id, slot.id, 0, (llama_pos) lcp_best);
+
+                                        // adopt tokens only — deliberately NOT donor->prompt.clone():
+                                        // that would deep-copy the donor's checkpoint blobs (tens of
+                                        // MiB each). The mirror's tail diverges anyway; it will grow
+                                        // its own checkpoints.
+                                        slot.prompt.clear();
+                                        slot.prompt.tokens = donor->prompt.tokens.clone();
+                                        slot.prompt.tokens.keep_first(lcp_best);
+                                    }
+                                }
+
                                 // reuse any previously computed tokens that are common with the new prompt
                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
 
