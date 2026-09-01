@@ -121,8 +121,13 @@ struct common_sampler {
 
     llama_token_data_array cur_p;
 
+    bool reasoning_end_observed       = false;
+    bool reasoning_end_replay_pending = false;
+
     void reset() {
         prev.clear();
+        reasoning_end_observed = false;
+        reasoning_end_replay_pending = false;
 
         llama_sampler_reset(chain);
     }
@@ -308,7 +313,9 @@ struct common_sampler * common_sampler_init(
     }
 
     // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() &&
+            (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control ||
+             params.reasoning_transition != common_params_sampling::REASONING_TRANSITION_NONE)) {
         const int32_t initial_reasoning_budget = params.reasoning_budget_excludes_prefill
             ? INT_MAX
             : params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens;
@@ -317,7 +324,10 @@ struct common_sampler * common_sampler_init(
             {params.reasoning_budget_start},
             params.reasoning_budget_end,
             params.reasoning_budget_forced,
-            initial_reasoning_budget);
+            initial_reasoning_budget,
+            REASONING_BUDGET_IDLE,
+            params.reasoning_transition,
+            params.reasoning_transition_tokens);
 
         for (const auto & token : prefill_tokens) {
             llama_sampler_accept(rbudget, token);
@@ -438,6 +448,8 @@ struct common_sampler * common_sampler_init(
         /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
         /* .cur     = */ {},
         /* .cur_p   = */ {},
+        /* .reasoning_end_observed       = */ false,
+        /* .reasoning_end_replay_pending = */ false,
     };
 
     return result;
@@ -462,9 +474,12 @@ static bool grammar_should_apply(struct common_sampler * gsmpl) {
     if (!gsmpl->rbudget) {
         return true;
     }
+    const auto state = common_reasoning_budget_get_state(gsmpl->rbudget);
+    if (state == REASONING_BUDGET_FORCING) {
+        return false;
+    }
     if (gsmpl->params.grammar_lazy) {
         // if grammar is lazy, only apply when reasoning budget is not active
-        const auto state = common_reasoning_budget_get_state(gsmpl->rbudget);
         return state == REASONING_BUDGET_IDLE || state == REASONING_BUDGET_DONE;
     }
     return true;
@@ -483,15 +498,20 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
     if (gsmpl->rbudget && is_generated) {
         llama_sampler_accept(gsmpl->rbudget, token);
 
-        // if done, replay end sequence which may contain a grammar trigger
+        const llama_tokens * end_seq = common_reasoning_budget_get_end_match(gsmpl->rbudget);
+        if (end_seq && !gsmpl->reasoning_end_observed) {
+            gsmpl->reasoning_end_observed = true;
+            gsmpl->reasoning_end_replay_pending = !accept_grammar;
+        }
+
+        // Synthetic transition tokens never enter the output grammar. Replay
+        // the reasoning close exactly once when the transition is complete.
         const bool is_done = common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_DONE;
-        if (gsmpl->grmr && !accept_grammar && is_done) {
-            const llama_tokens * end_seq = common_reasoning_budget_get_end_match(gsmpl->rbudget);
-            if (end_seq) {
-                for (const llama_token end_token : *end_seq) {
-                    llama_sampler_accept(gsmpl->grmr, end_token);
-                }
+        if (gsmpl->grmr && is_done && gsmpl->reasoning_end_replay_pending && end_seq) {
+            for (const llama_token end_token : *end_seq) {
+                llama_sampler_accept(gsmpl->grmr, end_token);
             }
+            gsmpl->reasoning_end_replay_pending = false;
         }
     }
 
@@ -521,6 +541,8 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
         /* .prev    = */ gsmpl->prev,
         /* .cur     = */ gsmpl->cur,
         /* .cur_p   = */ gsmpl->cur_p,
+        /* .reasoning_end_observed       = */ gsmpl->reasoning_end_observed,
+        /* .reasoning_end_replay_pending = */ gsmpl->reasoning_end_replay_pending,
     };
 }
 
@@ -540,6 +562,8 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
     dst->prev       = src->prev;
     dst->cur        = src->cur;
     dst->cur_p      = src->cur_p;
+    dst->reasoning_end_observed       = src->reasoning_end_observed;
+    dst->reasoning_end_replay_pending = src->reasoning_end_replay_pending;
     dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
     dst->t_total_us = src->t_total_us;
 }
@@ -597,6 +621,27 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
     return gsmpl->chain;
 }
 
+static llama_token common_sampler_apply_reasoning_transition(
+        struct common_sampler * gsmpl,
+        struct llama_context  * ctx,
+        int                     idx,
+        llama_token             sampled_token) {
+    if (!common_reasoning_budget_intercept_primary_end(gsmpl->rbudget, sampled_token)) {
+        return sampled_token;
+    }
+
+    // The sampled close was not accepted. Rebuild candidates from the same
+    // logits and let the reasoning sampler force the first transition token.
+    // Applying the normal chain keeps sampler accounting coherent; the close
+    // will be forced after the cue on subsequent decode steps.
+    gsmpl->set_logits(ctx, idx);
+    llama_sampler_apply(gsmpl->rbudget, &gsmpl->cur_p);
+    llama_sampler_apply(gsmpl->chain, &gsmpl->cur_p);
+
+    GGML_ASSERT(gsmpl->cur_p.selected != -1 && "no selected token while forcing reasoning transition");
+    return gsmpl->cur_p.data[gsmpl->cur_p.selected].id;
+}
+
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
     llama_synchronize(ctx);
 
@@ -646,7 +691,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     id = cur_p.data[cur_p.selected].id;
 
     if (grammar_first || !grammar_should_apply(gsmpl)) {
-        return id;
+        return common_sampler_apply_reasoning_transition(gsmpl, ctx, idx, id);
     }
 
     // check if it the sampled token fits the grammar (grammar-based rejection sampling)
@@ -658,7 +703,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
         const bool is_valid = single_token_data_array.data[0].logit != -INFINITY;
         if (is_valid) {
-            return id;
+            return common_sampler_apply_reasoning_transition(gsmpl, ctx, idx, id);
         }
     }
 
@@ -678,7 +723,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     id = cur_p.data[cur_p.selected].id;
 
-    return id;
+    return common_sampler_apply_reasoning_transition(gsmpl, ctx, idx, id);
 }
 
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {

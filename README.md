@@ -7,7 +7,8 @@ persistent companion is not a collection of unrelated chat completions: live
 conversation and autonomous thought must continue from the same accumulated
 model state, without repeatedly rebuilding a six-figure-token prompt.
 
-The fork is based on upstream commit `400e67b83` and is deliberately narrow.
+The fork is based directly on official `ggml-org/llama.cpp` commit `3466812d1`
+(build `b10751`) and is deliberately narrow.
 It is not intended to replace upstream `llama.cpp` for general use.
 
 ## Why shared KV exists
@@ -125,6 +126,32 @@ so it provides the last-line invariant and forensic evidence: after one
 reasoning window has ended, another `<think>` or `</think>` terminates the
 request. It never guesses which content was private, injects another delimiter,
 or retries the model.
+
+### Configurable reasoning transition
+
+Qwen's primary `</think>` delimiter is one token in Nikki's vocabulary. The
+server can therefore intercept that sampled close before it is accepted and
+force one request-owned transition cue in any of four placements:
+
+- `none`: preserve upstream behavior;
+- `before`: cue, then `</think>`;
+- `after`: `</think>`, then cue;
+- `both`: cue on each side of `</think>`.
+
+The request fields are `reasoning_transition_placement` and
+`reasoning_transition_cue`. Pre-close interception fails closed unless the
+primary end delimiter is exactly one token. Alternate reasoning terminators,
+including a tool-call transition, are not rewritten. Budget exhaustion keeps
+its existing budget message and applies the same placement around the forced
+close. Synthetic cue tokens bypass output grammars, while the close is replayed
+to the grammar exactly once.
+
+The cue remains part of the generated token stream and KV. This is deliberate:
+silently removing it from the response while leaving it in KV would make the
+next serialized history diverge from the resident cache. Application code owns
+the versioned cue and placement, and raw request/response tracing can therefore
+prove exactly which policy was used. The ChatML role remains `assistant`;
+Nikki's identity belongs in prompt content, not in Qwen's trained wire role.
 
 ## Build and focused verification
 

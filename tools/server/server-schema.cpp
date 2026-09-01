@@ -2,6 +2,8 @@
 
 #include "json-schema-to-grammar.h"
 
+#include <algorithm>
+
 namespace server_schema {
 
 //
@@ -430,6 +432,37 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
             }
         }));
 
+    add((new field_str("reasoning_transition_placement"))
+        ->set_desc("Place the reasoning transition cue before the primary close, after it, both, or nowhere")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            const std::string placement = data.at("reasoning_transition_placement").get<std::string>();
+            if (placement == "none") {
+                ctx.params.sampling.reasoning_transition = common_params_sampling::REASONING_TRANSITION_NONE;
+            } else if (placement == "before") {
+                ctx.params.sampling.reasoning_transition = common_params_sampling::REASONING_TRANSITION_BEFORE;
+            } else if (placement == "after") {
+                ctx.params.sampling.reasoning_transition = common_params_sampling::REASONING_TRANSITION_AFTER;
+            } else if (placement == "both") {
+                ctx.params.sampling.reasoning_transition = common_params_sampling::REASONING_TRANSITION_BOTH;
+            } else {
+                throw std::invalid_argument(
+                    "reasoning_transition_placement must be one of: none, before, after, both");
+            }
+        }));
+
+    add((new field_str("reasoning_transition_cue"))
+        ->set_desc("Exact synthetic text forced at the configured reasoning transition")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            GGML_ASSERT(ctx.vocab != nullptr);
+            ctx.params.sampling.reasoning_transition_cue =
+                data.at("reasoning_transition_cue").get<std::string>();
+            ctx.params.sampling.reasoning_transition_tokens = common_tokenize(
+                ctx.vocab,
+                ctx.params.sampling.reasoning_transition_cue,
+                false,
+                true);
+        }));
+
     add((new field_json("logit_bias"))
         ->set_desc("Modify the likelihood of specific tokens. Accepts an array of [token, bias] pairs or an object mapping token to bias. Use false as bias to ban a token")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
@@ -556,14 +589,60 @@ task_params eval_llama_cmpl_schema(
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
     }
 
+    {
+        const auto placement = params.sampling.reasoning_transition;
+        const bool enabled = placement != common_params_sampling::REASONING_TRANSITION_NONE;
+        const bool before = placement == common_params_sampling::REASONING_TRANSITION_BEFORE ||
+                            placement == common_params_sampling::REASONING_TRANSITION_BOTH;
+        if (enabled && params.sampling.reasoning_transition_tokens.empty()) {
+            throw std::invalid_argument(
+                "reasoning_transition_cue must tokenize to at least one token when transition placement is enabled");
+        }
+        if (params.sampling.reasoning_transition_cue.size() > 1024 ||
+            params.sampling.reasoning_transition_tokens.size() > 256) {
+            throw std::invalid_argument(
+                "reasoning_transition_cue exceeds its 1024-byte or 256-token bound");
+        }
+        if (before && (params.sampling.reasoning_budget_end.empty() ||
+                       params.sampling.reasoning_budget_end.front().size() != 1)) {
+            throw std::invalid_argument(
+                "before reasoning transition requires a single-token primary reasoning end tag");
+        }
+        if (!params.sampling.reasoning_budget_end.empty() &&
+            params.sampling.reasoning_budget_forced.empty()) {
+            params.sampling.reasoning_budget_forced =
+                params.sampling.reasoning_budget_end.front();
+        }
+        auto contains_sequence = [](const llama_tokens & values, const llama_tokens & sequence) {
+            return !sequence.empty() &&
+                   std::search(values.begin(), values.end(), sequence.begin(), sequence.end()) !=
+                       values.end();
+        };
+        if (enabled &&
+            (contains_sequence(
+                 params.sampling.reasoning_transition_tokens,
+                 params.sampling.reasoning_budget_start) ||
+             std::any_of(
+                 params.sampling.reasoning_budget_end.begin(),
+                 params.sampling.reasoning_budget_end.end(),
+                 [&](const llama_tokens & end) {
+                     return contains_sequence(params.sampling.reasoning_transition_tokens, end);
+                 }))) {
+            throw std::invalid_argument(
+                "reasoning_transition_cue must not contain reasoning delimiters");
+        }
+    }
+
     // debugging
     {
         auto budget = params.sampling.reasoning_budget_tokens;
-        SRV_DBG("reasoning budget: tokens=%d, generation_prompt='%s', start=%zu toks, end=%zu seqs, forced=%zu toks\n",
+        SRV_DBG("reasoning budget: tokens=%d, generation_prompt='%s', start=%zu toks, end=%zu seqs, forced=%zu toks, transition=%d/%zu toks\n",
                 budget, params.sampling.generation_prompt.c_str(),
                 params.sampling.reasoning_budget_start.size(),
                 params.sampling.reasoning_budget_end.size(),
-                params.sampling.reasoning_budget_forced.size());
+                params.sampling.reasoning_budget_forced.size(),
+                static_cast<int>(params.sampling.reasoning_transition),
+                params.sampling.reasoning_transition_tokens.size());
     }
 
     return params;

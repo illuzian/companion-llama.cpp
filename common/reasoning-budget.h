@@ -39,7 +39,10 @@ struct llama_sampler * common_reasoning_budget_init(
         const std::vector<llama_tokens> & end_seqs,
         const llama_tokens              & forced_tokens,
         int32_t                           budget,
-        common_reasoning_budget_state     initial_state = REASONING_BUDGET_IDLE);
+        common_reasoning_budget_state     initial_state = REASONING_BUDGET_IDLE,
+        common_params_sampling::reasoning_transition_placement transition_placement =
+            common_params_sampling::REASONING_TRANSITION_NONE,
+        const llama_tokens              & transition_tokens = {});
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
 
@@ -57,6 +60,13 @@ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sa
 // Manually transition the reasoning budget sampler into the FORCING state.
 // Returns true if the transition occurred.
 bool common_reasoning_budget_force(struct llama_sampler * smpl);
+
+// Intercept a naturally sampled primary reasoning-end token so a configured
+// pre-close transition can be forced before it. The sampled token has not yet
+// been accepted and must be resampled when this returns true.
+bool common_reasoning_budget_intercept_primary_end(
+        struct llama_sampler * smpl,
+        llama_token            sampled_token);
 
 // True after generated tokens contain a second reasoning delimiter. Prompt
 // tokens initialize the state but never set this flag.

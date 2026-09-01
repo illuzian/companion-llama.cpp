@@ -294,6 +294,17 @@ struct common_params_sampling {
     std::string               reasoning_budget_message;        // message injected before end tag when budget exhausted
     bool                      reasoning_control = false;       // create the budget sampler on demand so reasoning can be ended at runtime
 
+    enum reasoning_transition_placement {
+        REASONING_TRANSITION_NONE,
+        REASONING_TRANSITION_BEFORE,
+        REASONING_TRANSITION_AFTER,
+        REASONING_TRANSITION_BOTH,
+    };
+
+    reasoning_transition_placement reasoning_transition = REASONING_TRANSITION_NONE;
+    std::vector<llama_token>        reasoning_transition_tokens;
+    std::string                     reasoning_transition_cue;
+
     bool backend_sampling = false;
 
     // print the parameters into a string

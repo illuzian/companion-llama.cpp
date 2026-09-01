@@ -351,6 +351,96 @@ static void test_reasoning_budget_end_match() {
     fprintf(stderr, "  Test 'matched end sequence' passed\n");
 }
 
+static void accept_forced_token(
+        struct llama_sampler * sampler,
+        llama_token            expected,
+        llama_token            max_token = 120) {
+    GGML_ASSERT(get_forced_token(sampler, max_token) == expected);
+    llama_sampler_accept(sampler, expected);
+}
+
+static void test_reasoning_transition_placements() {
+    const std::vector<llama_tokens> start = {{100}};
+    const std::vector<llama_tokens> end = {{101}, {103, 104}};
+    const llama_tokens forced = {120, 101};
+    const llama_tokens cue = {110, 111};
+
+    {
+        auto * sampler = common_reasoning_budget_init(
+            nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
+            common_params_sampling::REASONING_TRANSITION_BEFORE, cue);
+        llama_sampler_accept(sampler, 100);
+        GGML_ASSERT(common_reasoning_budget_intercept_primary_end(sampler, 101));
+        accept_forced_token(sampler, 110);
+        accept_forced_token(sampler, 111);
+        accept_forced_token(sampler, 101);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        GGML_ASSERT(*common_reasoning_budget_get_end_match(sampler) == llama_tokens({101}));
+        llama_sampler_free(sampler);
+    }
+
+    {
+        auto * sampler = common_reasoning_budget_init(
+            nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
+            common_params_sampling::REASONING_TRANSITION_AFTER, cue);
+        llama_sampler_accept(sampler, 100);
+        GGML_ASSERT(!common_reasoning_budget_intercept_primary_end(sampler, 101));
+        llama_sampler_accept(sampler, 101);
+        accept_forced_token(sampler, 110);
+        accept_forced_token(sampler, 111);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        llama_sampler_free(sampler);
+    }
+
+    {
+        auto * sampler = common_reasoning_budget_init(
+            nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
+            common_params_sampling::REASONING_TRANSITION_BOTH, cue);
+        llama_sampler_accept(sampler, 100);
+        GGML_ASSERT(common_reasoning_budget_intercept_primary_end(sampler, 101));
+        accept_forced_token(sampler, 110);
+        accept_forced_token(sampler, 111);
+        accept_forced_token(sampler, 101);
+        accept_forced_token(sampler, 110);
+        accept_forced_token(sampler, 111);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        llama_sampler_free(sampler);
+    }
+
+    // Alternate reasoning terminators remain untouched. Only the primary
+    // Qwen close is eligible for transition steering.
+    {
+        auto * sampler = common_reasoning_budget_init(
+            nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
+            common_params_sampling::REASONING_TRANSITION_BOTH, cue);
+        llama_sampler_accept(sampler, 100);
+        llama_sampler_accept(sampler, 103);
+        llama_sampler_accept(sampler, 104);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        GGML_ASSERT(*common_reasoning_budget_get_end_match(sampler) == llama_tokens({103, 104}));
+        llama_sampler_free(sampler);
+    }
+
+    // A budget close keeps its existing budget message, inserts the cue just
+    // before the close, and then applies the optional post-close cue.
+    {
+        auto * sampler = common_reasoning_budget_init(
+            nullptr, start, end, forced, 0, REASONING_BUDGET_FORCING,
+            common_params_sampling::REASONING_TRANSITION_BOTH, cue);
+        accept_forced_token(sampler, 120);
+        accept_forced_token(sampler, 110);
+        accept_forced_token(sampler, 111);
+        accept_forced_token(sampler, 101);
+        accept_forced_token(sampler, 110);
+        accept_forced_token(sampler, 111);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+        llama_sampler_free(sampler);
+    }
+
+    GGML_ASSERT(!common_reasoning_budget_intercept_primary_end(nullptr, 101));
+    fprintf(stderr, "  Test 'reasoning transition placements' passed\n");
+}
+
 // UTF-8 boundary detection unit test
 // Tests common_utf8_is_complete() from reasoning-budget.h
 static void test_utf8_boundary_detection() {
@@ -532,8 +622,9 @@ int main(void) {
     test_reasoning_budget_clone_mid_forcing();
     test_reasoning_budget_force_manual();
     test_reasoning_budget_end_match();
+    test_reasoning_transition_placements();
 
-    printf("OK (12 tests passed)\n");
+    printf("OK (17 tests passed)\n");
 
     printf("Testing UTF-8 boundary detection... ");
     test_utf8_boundary_detection();
