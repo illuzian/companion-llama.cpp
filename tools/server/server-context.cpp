@@ -3906,9 +3906,10 @@ private:
                             // retained prompt, and n_predict is required to be
                             // zero. Do not fabricate a token evaluation merely
                             // to obtain logits which the caller cannot consume.
-                            slot.n_prompt_tokens_cache     = n_past;
-                            slot.n_prompt_tokens_processed = 0;
-                            slot.t_prompt_processing = (ggml_time_us() - slot.t_start_process_prompt) / 1e3;
+                            slot.stats.n_prompt_cached = n_past;
+                            slot.stats.n_prompt_processed = 0;
+                            slot.stats.update_prompt_last();
+                            metrics.add_prompt_cached(n_past);
                             slot.stop           = STOP_TYPE_LIMIT;
                             slot.has_next_token = false;
                             slot.i_batch        = -1;
@@ -4359,7 +4360,7 @@ private:
                 // A zero prediction budget is an explicit prompt-only cache
                 // ingest. Finish after prompt evaluation and before sampler
                 // state is touched or a token is emitted.
-                if (!slot.has_budget(params_base)) {
+                if (!slot.has_budget()) {
                     slot.stop           = STOP_TYPE_LIMIT;
                     slot.has_next_token = false;
                     slot.i_batch        = -1;
