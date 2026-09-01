@@ -3913,9 +3913,7 @@ private:
                             slot.stop           = STOP_TYPE_LIMIT;
                             slot.has_next_token = false;
                             slot.i_batch        = -1;
-                            metrics.on_prompt_eval(slot);
                             send_final_response(slot);
-                            metrics.on_prediction(slot);
                             slot.release();
                             return;
                         }
@@ -4364,9 +4362,7 @@ private:
                     slot.stop           = STOP_TYPE_LIMIT;
                     slot.has_next_token = false;
                     slot.i_batch        = -1;
-                    metrics.on_prompt_eval(slot);
                     send_final_response(slot);
-                    metrics.on_prediction(slot);
                     slot.release();
                     return;
                 }
@@ -4401,7 +4397,6 @@ private:
             if (common_sampler_reasoning_protocol_violated(slot.smpl.get())) {
                 SLT_ERR(slot, "%s", "reasoning protocol violation; terminating request\n");
                 send_error(slot, "reasoning protocol violation", ERROR_TYPE_SERVER);
-                metrics.on_prediction(slot);
                 slot.release();
                 return;
             }
@@ -4468,7 +4463,6 @@ private:
                 if (common_sampler_reasoning_protocol_violated(slot.smpl.get())) {
                     SLT_ERR(slot, "%s", "reasoning protocol violation; terminating request\n");
                     send_error(slot, "reasoning protocol violation", ERROR_TYPE_SERVER);
-                    metrics.on_prediction(slot);
                     slot.release();
                     return;
                 }

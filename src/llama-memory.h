@@ -135,7 +135,12 @@ struct llama_memory_i {
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
 
-    virtual std::vector<llama_memory_cell_usage> get_cell_usage(llama_seq_id seq_id) const = 0;
+    // Optional diagnostics for memory implementations that expose cell-level
+    // accounting. Composite and non-cell memories may return no entries.
+    virtual std::vector<llama_memory_cell_usage> get_cell_usage(llama_seq_id seq_id) const {
+        (void) seq_id;
+        return {};
+    }
 
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
 

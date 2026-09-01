@@ -1257,12 +1257,10 @@ bool llama_kv_cache::get_can_shift_text() const {
     }
     // M-RoPE/IMRoPE text positions share one temporal coordinate. The shift
     // graph normalizes their key rotation to NEOX ordering. Spatial media
-    // positions are deliberately excluded by the caller contract.
-    for (const auto & layer : layers) {
-        if (layer.k_idx) {
-            return false;
-        }
-    }
+    // positions are deliberately excluded by the caller contract. Indexed
+    // attention uses llama_kv_cache_msa in current upstream rather than an
+    // optional tensor on this cache, so this base cache has no indexer state
+    // that could be left stale by the shift.
     return true;
 }
 

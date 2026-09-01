@@ -436,9 +436,9 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
             // it here, once, before any consumer sees it — but only when it
             // does not already parse, so well-formed calls are untouched.
             std::string args(text);
-            if (!ordered_json::accept(args)) {
+            if (ordered_json::parse_no_throw(args).is_discarded()) {
                 std::string repaired = repair_unescaped_quotes(args);
-                if (ordered_json::accept(repaired)) {
+                if (!ordered_json::parse_no_throw(repaired).is_discarded()) {
                     args = std::move(repaired);
                 }
             }
