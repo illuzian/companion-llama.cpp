@@ -56,9 +56,7 @@ struct common_reasoning_budget_ctx {
     token_matcher end_matcher;
     llama_tokens forced_tokens;
     llama_tokens natural_before_tokens;
-    llama_tokens transition_tokens;
-
-    common_params_sampling::reasoning_transition_placement transition_placement;
+    llama_tokens transition_after_tokens;
 
     int32_t budget;           // maximum tokens in reasoning block
     int32_t remaining;        // tokens remaining in budget
@@ -87,22 +85,10 @@ static const llama_tokens & common_reasoning_budget_active_tokens(
         case common_reasoning_budget_ctx::FORCE_NATURAL_BEFORE:
             return ctx->natural_before_tokens;
         case common_reasoning_budget_ctx::FORCE_AFTER:
-            return ctx->transition_tokens;
+            return ctx->transition_after_tokens;
     }
 
     GGML_ABORT("invalid reasoning force kind");
-}
-
-static bool common_reasoning_transition_has_before(
-        common_params_sampling::reasoning_transition_placement placement) {
-    return placement == common_params_sampling::REASONING_TRANSITION_BEFORE ||
-           placement == common_params_sampling::REASONING_TRANSITION_BOTH;
-}
-
-static bool common_reasoning_transition_has_after(
-        common_params_sampling::reasoning_transition_placement placement) {
-    return placement == common_params_sampling::REASONING_TRANSITION_AFTER ||
-           placement == common_params_sampling::REASONING_TRANSITION_BOTH;
 }
 
 static void common_reasoning_budget_begin_force(
@@ -118,7 +104,7 @@ static void common_reasoning_budget_finish_close(
         common_reasoning_budget_ctx * ctx,
         int32_t match) {
     ctx->end_match = match;
-    if (match == 0 && common_reasoning_transition_has_after(ctx->transition_placement)) {
+    if (match == 0 && !ctx->transition_after_tokens.empty()) {
         common_reasoning_budget_begin_force(ctx, common_reasoning_budget_ctx::FORCE_AFTER);
         COM_TRC("%s", "reasoning closed; forcing post-close transition\n");
         return;
@@ -257,8 +243,8 @@ static struct llama_sampler * common_reasoning_budget_init_state(
         const struct llama_vocab * vocab, const std::vector<llama_tokens> & start_seqs,
         const std::vector<llama_tokens> & end_seqs, const llama_tokens & forced_tokens,
         int32_t budget, common_reasoning_budget_state initial_state,
-        common_params_sampling::reasoning_transition_placement transition_placement,
-        const llama_tokens & transition_tokens);
+        const llama_tokens & transition_before_tokens,
+        const llama_tokens & transition_after_tokens);
 
 static struct llama_sampler * common_reasoning_budget_clone(const struct llama_sampler * smpl);
 
@@ -297,8 +283,8 @@ static struct llama_sampler * common_reasoning_budget_init_state(
         const llama_tokens              & forced_tokens,
         int32_t                           budget,
         common_reasoning_budget_state     initial_state,
-        common_params_sampling::reasoning_transition_placement transition_placement,
-        const llama_tokens              & transition_tokens) {
+        const llama_tokens              & transition_before_tokens,
+        const llama_tokens              & transition_after_tokens) {
     // promote COUNTING with budget <= 0 to FORCING
     if (initial_state == REASONING_BUDGET_COUNTING && budget <= 0) {
         initial_state = REASONING_BUDGET_FORCING;
@@ -306,15 +292,15 @@ static struct llama_sampler * common_reasoning_budget_init_state(
 
     llama_tokens budget_forced_tokens = forced_tokens;
     llama_tokens natural_before_tokens;
-    if (common_reasoning_transition_has_before(transition_placement)) {
+    if (!transition_before_tokens.empty()) {
         GGML_ASSERT(!end_seqs.empty() && end_seqs.front().size() == 1);
         const llama_tokens & primary_end = end_seqs.front();
         GGML_ASSERT(budget_forced_tokens.size() >= primary_end.size());
         budget_forced_tokens.insert(
             budget_forced_tokens.end() - primary_end.size(),
-            transition_tokens.begin(),
-            transition_tokens.end());
-        natural_before_tokens = transition_tokens;
+            transition_before_tokens.begin(),
+            transition_before_tokens.end());
+        natural_before_tokens = transition_before_tokens;
         natural_before_tokens.insert(
             natural_before_tokens.end(),
             primary_end.begin(),
@@ -329,8 +315,7 @@ static struct llama_sampler * common_reasoning_budget_init_state(
             /* .end_matcher   = */ token_matcher(end_seqs),
             /* .forced_tokens = */ std::move(budget_forced_tokens),
             /* .natural_before_tokens = */ std::move(natural_before_tokens),
-            /* .transition_tokens = */ transition_tokens,
-            /* .transition_placement = */ transition_placement,
+            /* .transition_after_tokens = */ transition_after_tokens,
             /* .budget        = */ budget,
             /* .remaining     = */ budget,
             /* .state         = */ initial_state,
@@ -349,11 +334,11 @@ struct llama_sampler * common_reasoning_budget_init(
         const llama_tokens              & forced_tokens,
         int32_t                           budget,
         common_reasoning_budget_state     initial_state,
-        common_params_sampling::reasoning_transition_placement transition_placement,
-        const llama_tokens              & transition_tokens) {
+        const llama_tokens              & transition_before_tokens,
+        const llama_tokens              & transition_after_tokens) {
     return common_reasoning_budget_init_state(
         vocab, start_seqs, end_seqs, forced_tokens, budget, initial_state,
-        transition_placement, transition_tokens);
+        transition_before_tokens, transition_after_tokens);
 }
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl) {
@@ -433,7 +418,7 @@ bool common_reasoning_budget_intercept_primary_end(
     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
     if ((ctx->state != REASONING_BUDGET_COUNTING &&
          ctx->state != REASONING_BUDGET_WAITING_UTF8) ||
-        !common_reasoning_transition_has_before(ctx->transition_placement) ||
+        ctx->natural_before_tokens.empty() ||
         ctx->end_matcher.seqs.empty() ||
         ctx->end_matcher.seqs.front().size() != 1 ||
         ctx->end_matcher.seqs.front().front() != sampled_token) {

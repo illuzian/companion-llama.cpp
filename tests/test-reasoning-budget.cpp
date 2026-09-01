@@ -359,16 +359,17 @@ static void accept_forced_token(
     llama_sampler_accept(sampler, expected);
 }
 
-static void test_reasoning_transition_placements() {
+static void test_reasoning_transition_edges() {
     const std::vector<llama_tokens> start = {{100}};
     const std::vector<llama_tokens> end = {{101}, {103, 104}};
     const llama_tokens forced = {120, 101};
-    const llama_tokens cue = {110, 111};
+    const llama_tokens before_cue = {110, 111};
+    const llama_tokens after_cue = {112, 113};
 
     {
         auto * sampler = common_reasoning_budget_init(
             nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
-            common_params_sampling::REASONING_TRANSITION_BEFORE, cue);
+            before_cue, {});
         llama_sampler_accept(sampler, 100);
         GGML_ASSERT(common_reasoning_budget_intercept_primary_end(sampler, 101));
         accept_forced_token(sampler, 110);
@@ -382,12 +383,12 @@ static void test_reasoning_transition_placements() {
     {
         auto * sampler = common_reasoning_budget_init(
             nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
-            common_params_sampling::REASONING_TRANSITION_AFTER, cue);
+            {}, after_cue);
         llama_sampler_accept(sampler, 100);
         GGML_ASSERT(!common_reasoning_budget_intercept_primary_end(sampler, 101));
         llama_sampler_accept(sampler, 101);
-        accept_forced_token(sampler, 110);
-        accept_forced_token(sampler, 111);
+        accept_forced_token(sampler, 112);
+        accept_forced_token(sampler, 113);
         GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
         llama_sampler_free(sampler);
     }
@@ -395,14 +396,14 @@ static void test_reasoning_transition_placements() {
     {
         auto * sampler = common_reasoning_budget_init(
             nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
-            common_params_sampling::REASONING_TRANSITION_BOTH, cue);
+            before_cue, after_cue);
         llama_sampler_accept(sampler, 100);
         GGML_ASSERT(common_reasoning_budget_intercept_primary_end(sampler, 101));
         accept_forced_token(sampler, 110);
         accept_forced_token(sampler, 111);
         accept_forced_token(sampler, 101);
-        accept_forced_token(sampler, 110);
-        accept_forced_token(sampler, 111);
+        accept_forced_token(sampler, 112);
+        accept_forced_token(sampler, 113);
         GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
         llama_sampler_free(sampler);
     }
@@ -412,7 +413,7 @@ static void test_reasoning_transition_placements() {
     {
         auto * sampler = common_reasoning_budget_init(
             nullptr, start, end, forced, 10, REASONING_BUDGET_IDLE,
-            common_params_sampling::REASONING_TRANSITION_BOTH, cue);
+            before_cue, after_cue);
         llama_sampler_accept(sampler, 100);
         llama_sampler_accept(sampler, 103);
         llama_sampler_accept(sampler, 104);
@@ -426,19 +427,19 @@ static void test_reasoning_transition_placements() {
     {
         auto * sampler = common_reasoning_budget_init(
             nullptr, start, end, forced, 0, REASONING_BUDGET_FORCING,
-            common_params_sampling::REASONING_TRANSITION_BOTH, cue);
+            before_cue, after_cue);
         accept_forced_token(sampler, 120);
         accept_forced_token(sampler, 110);
         accept_forced_token(sampler, 111);
         accept_forced_token(sampler, 101);
-        accept_forced_token(sampler, 110);
-        accept_forced_token(sampler, 111);
+        accept_forced_token(sampler, 112);
+        accept_forced_token(sampler, 113);
         GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
         llama_sampler_free(sampler);
     }
 
     GGML_ASSERT(!common_reasoning_budget_intercept_primary_end(nullptr, 101));
-    fprintf(stderr, "  Test 'reasoning transition placements' passed\n");
+    fprintf(stderr, "  Test 'reasoning transition edges' passed\n");
 }
 
 // UTF-8 boundary detection unit test
@@ -622,7 +623,7 @@ int main(void) {
     test_reasoning_budget_clone_mid_forcing();
     test_reasoning_budget_force_manual();
     test_reasoning_budget_end_match();
-    test_reasoning_transition_placements();
+    test_reasoning_transition_edges();
 
     printf("OK (17 tests passed)\n");
 

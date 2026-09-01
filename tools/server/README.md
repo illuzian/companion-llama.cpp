@@ -1377,14 +1377,14 @@ The `response_format` parameter supports both plain JSON output (e.g. `{"type": 
 
 `reasoning_control`: Arms realtime reasoning control for this completion so it can be ended early via `/v1/chat/completions/control`. Defaults to `false`.
 
-`reasoning_transition_placement`: Optional Companion extension controlling an
-exact transition cue around the primary reasoning close. Accepted values are
-`none`, `before`, `after`, and `both`; the default is `none`.
+`reasoning_transition_before_cue`: Optional exact text forced immediately
+before the primary reasoning close. It requires that close to tokenize to
+exactly one token.
 
-`reasoning_transition_cue`: Exact text forced at the configured transition.
-The cue is bounded to 1024 bytes and 256 tokens and may not contain a reasoning
-delimiter. `before` and `both` require the primary reasoning close to tokenize
-to exactly one token. Alternate end tags are left untouched.
+`reasoning_transition_after_cue`: Optional exact text forced immediately after
+the primary reasoning close. Each edge is independently bounded to 1024 bytes
+and 256 tokens and may not contain a reasoning delimiter. Supplying both may
+use different text. Alternate end tags are left untouched.
 
 `generation_prompt`: The generation prompt that was prefilled in by the template. Prepended to model output before parsing.
 

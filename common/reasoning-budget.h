@@ -40,9 +40,8 @@ struct llama_sampler * common_reasoning_budget_init(
         const llama_tokens              & forced_tokens,
         int32_t                           budget,
         common_reasoning_budget_state     initial_state = REASONING_BUDGET_IDLE,
-        common_params_sampling::reasoning_transition_placement transition_placement =
-            common_params_sampling::REASONING_TRANSITION_NONE,
-        const llama_tokens              & transition_tokens = {});
+        const llama_tokens              & transition_before_tokens = {},
+        const llama_tokens              & transition_after_tokens = {});
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
 

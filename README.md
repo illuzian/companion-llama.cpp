@@ -131,26 +131,24 @@ or retries the model.
 
 Qwen's primary `</think>` delimiter is one token in Nikki's vocabulary. The
 server can therefore intercept that sampled close before it is accepted and
-force one request-owned transition cue in any of four placements:
+force two independently optional request-owned transition cues:
 
-- `none`: preserve upstream behavior;
-- `before`: cue, then `</think>`;
-- `after`: `</think>`, then cue;
-- `both`: cue on each side of `</think>`.
+- `reasoning_transition_before_cue`: cue, then `</think>`;
+- `reasoning_transition_after_cue`: `</think>`, then cue.
 
-The request fields are `reasoning_transition_placement` and
-`reasoning_transition_cue`. Pre-close interception fails closed unless the
-primary end delimiter is exactly one token. Alternate reasoning terminators,
-including a tool-call transition, are not rewritten. Budget exhaustion keeps
-its existing budget message and applies the same placement around the forced
-close. Synthetic cue tokens bypass output grammars, while the close is replayed
-to the grammar exactly once.
+Omitting both preserves upstream behavior; supplying both may use distinct
+text on each edge. Pre-close interception fails closed unless the primary end
+delimiter is exactly one token. Alternate reasoning terminators, including a
+tool-call transition, are not rewritten. Budget exhaustion keeps its existing
+budget message and applies the configured edges around the forced close.
+Synthetic cue tokens bypass output grammars, while the close is replayed to the
+grammar exactly once.
 
-The cue remains part of the generated token stream and KV. This is deliberate:
+Both cues remain part of the generated token stream and KV. This is deliberate:
 silently removing it from the response while leaving it in KV would make the
 next serialized history diverge from the resident cache. Application code owns
-the versioned cue and placement, and raw request/response tracing can therefore
-prove exactly which policy was used. The ChatML role remains `assistant`;
+the versioned edge cues, and raw request/response tracing can therefore prove
+exactly which text was used. The ChatML role remains `assistant`;
 Nikki's identity belongs in prompt content, not in Qwen's trained wire role.
 
 ## Build and focused verification
